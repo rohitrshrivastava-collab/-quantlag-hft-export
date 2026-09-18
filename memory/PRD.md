@@ -15,6 +15,8 @@ SQLite persistence, paper/live toggle.
   Futures REST client (wallet_balance, positions, ticker, place_order,
   get_order_status, cancel_order, cancel_all_open_orders, order_book,
   instrument_info).
+- `backend/bot_engine.py::LiveCoinSwitchBookFeed` — public book WS (primary
+  laggard feed); `LiveCoinSwitchTickerPoller` is now only the REST fallback.
 - `backend/server.py` — FastAPI, `/api/*` endpoints (14 total including
   `/api/coinswitch/check`).
 - `frontend/src/App.js` — React dashboard.
@@ -47,13 +49,34 @@ SQLite persistence, paper/live toggle.
 - Dashboard "Run check" button in the config panel.
 - Full backend regression: 16/16 tests pass (`iteration_2.json`).
 
+### Iteration 3 (2026-06, "CoinSwitch WebSocket Feed")
+- `LiveCoinSwitchBookFeed` — public CoinSwitch PRO Futures order-book stream
+  (Socket.IO v4 spoken directly over aiohttp WS: `0`→`40/exchange_2,`,
+  `2`→`3` ping/pong, `42/exchange_2,[FETCH_ORDER_BOOK_CS_PRO,{…}]` snapshots).
+  Symbol is read from `symbol` OR `s` (live payload uses `s`). No API keys needed.
+  Measured from preview pod: ~120 ms wire latency, ~44 snapshots/s for 10 coins.
+- When `SIMULATE_MARKET=false`, real Binance WS + real CoinSwitch WS power BOTH
+  PAPER and LIVE modes (paper-trade on real quotes).
+- Staleness gate: `LAGGARD_STALE_AFTER_S` (default 10). `_feed_watchdog_loop`
+  starts the REST ticker poller when WS is stale (keys required) and stops it on
+  recovery; without keys, laggard is marked STALE and new entries pause.
+- `/api/telemetry.feed` → source (SIMULATOR|COINSWITCH_WS|REST_POLLER|STALE),
+  laggard {connected, subscribed, last_msg_age_s, wire_latency_ms, msgs_per_s,
+  msg_count, reconnects, last_error, coins[{coin, age_ms, stale}]},
+  leader {connected, last_msg_age_s, reconnects, coins_with_quotes},
+  rest_fallback {available, active}.
+- Dashboard "Laggard Feed" health strip (`FeedHealthStrip`).
+- Preview backend `.env` now runs `SIMULATE_MARKET=false` (real public data).
+- Regression: 9/9 backend + frontend pass (`iteration_3.json`).
+
 ## Prioritized backlog
-- P1: Real CoinSwitch WebSocket book stream (replace `LiveCoinSwitchTickerPoller`).
 - P1: Multi-source FX (Binance P2P median) for robustness beyond CoinGecko.
 - P1: Token-bucket rate limiter around REST fan-out.
+- P1: Telegram — verify real dispatch once user supplies token/chat id.
 - P2: Equity curve chart on dashboard (data available at `/api/equity-curve`).
 - P2: CSV export of closed trades, per-coin filter.
 - P2: Per-coin kill switch (pause a slot without stopping the whole bot).
+- P2: Dynamic asset-universe screening (24h volume / liquidity).
 
 ## Deployment
 - EC2 t3.small (Mumbai) recommended. Use `tmux` + `python standalone_bot/run_bot.py`.

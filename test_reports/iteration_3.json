@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 3: tested new CoinSwitch PRO Futures WS feed telemetry + regression + frontend FeedHealthStrip. 9/9 pytest passed (backend/tests/test_backend_iter3_feed.py). /api/telemetry.feed reports source=COINSWITCH_WS, laggard.connected=true, subscribed=true, wire_latency_ms~120, msgs_per_s~42, all 10 coins fresh (age_ms<500), leader.coins_with_quotes=10, rest_fallback={available:false,active:false}. Spreads confirm INR-scaled CSW quotes ~= binance*fx (within 3%), 10 items, ask>=bid, small gross_spread_pct. Stop->Start cycle: feed recovers to COINSWITCH_WS within ~2-3s. LIVE-mode toggle returns response mentioning missing keys; restored to PAPER. Bot left RUNNING in PAPER mode. Frontend renders laggard-feed-health-strip with all required badges and 10 coin chips; no simulator/rest-fallback badges; header WS LIVE + MODE PAPER; 10 spread cards with non-zero CSW bids; no console errors.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed": [
+    "GET /api/telemetry.feed shape (source, laggard connected/subscribed/wire_latency/msgs_per_s/coins x10 all fresh, leader 10/10, rest_fallback disabled)",
+    "GET /api/spreads: 10 items, INR-scaled CSW quotes match binance*fx within 3%, ask>=bid, |gross_spread_pct|<2",
+    "Regression: /api/status, /api/config (simulate:false), /api/positions/open, /api/positions/closed, /api/equity-curve, /api/hourly-summary, /api/logs all 200",
+    "/api/logs contains PAPER + CoinSwitch startup message",
+    "POST /api/coinswitch/check -> 400 (unchanged)",
+    "Stop -> Start cycle: telemetry feed recovers to COINSWITCH_WS with fresh coins within 15s",
+    "POST /api/bot/mode paper_trading:false returns warning mentioning missing CoinSwitch keys; then restored to PAPER",
+    "Frontend FeedHealthStrip: all data-testids present with expected text (SRC · COINSWITCH WS, WS SUBSCRIBED, WIRE · <n> MS, BINANCE WS UP · 10/10, 10 coin chips)",
+    "No feed-simulator-badge and no feed-rest-fallback-badge (correct given real-WS + no keys)",
+    "Header: telemetry-ws-heartbeat-status=WS LIVE, paper-live-mode-toggle=MODE · PAPER",
+    "10 spread-slot-card-* cards render with non-zero CSW bid values",
+    "Zero console errors during dashboard load"
+  ],
+  "failed": [],
+  "test_report_links": ["/app/backend/tests/test_backend_iter3_feed.py", "/app/test_reports/pytest/iter3.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "FeedHealthStrip msg-rate badge uses same green color as WS-connected — consider a muted variant to visually rank badges by importance.",
+    "Consider surfacing feed.laggard.last_error to the dashboard (data-testid=feed-last-error exists but only rendered on error); add a subtle 'clean' indicator to avoid layout jump when error appears.",
+    "/api/config exposes 'simulate' but no explicit 'simulate_market'; consider renaming for consistency with backend/.env key SIMULATE_MARKET."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter3_feed.py", "/app/test_reports/iteration_3.json"],
+  "success_rate": {"backend": "100% (9/9)", "frontend": "100% (all data-testids + shapes verified, 0 console errors)"},
+  "test_credentials": "none (public unauthenticated feeds)",
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iter3 pytest suite at /app/backend/tests/test_backend_iter3_feed.py validates the new /api/telemetry.feed contract and INR-scaling of /api/spreads (within 3% of binance*fx). Iter2 suite (test_backend_iter2.py) still valid for CoinSwitch client signing + LIVE-mode plumbing. Bot left RUNNING in PAPER mode as required. When real CoinSwitch keys are added, expect rest_fallback.available -> true and coinswitch_client_ready -> true."
+}
