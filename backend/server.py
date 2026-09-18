@@ -182,7 +182,47 @@ async def telemetry():
         "simulate": ENGINE.cfg.simulate,
         "coinswitch_client_ready": ENGINE.coinswitch is not None,
         "feed": ENGINE.feed_health(),
+        "telegram": ENGINE.telegram.status(),
     }
+
+
+@api.get("/telegram/status")
+async def telegram_status():
+    return ENGINE.telegram.status()
+
+
+@api.post("/telegram/test")
+async def telegram_test():
+    """Sends a real test alert to the configured chat; 400 if not configured, 502 on API error."""
+    tg = ENGINE.telegram
+    if not tg.enabled:
+        raise HTTPException(status_code=400, detail="TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured in backend/.env")
+    try:
+        me = await tg.get_me()
+        snap = ENGINE.snapshot()
+        await tg.send(
+            "🔔 <b>QuantLag HFT test alert</b>\n"
+            f"Mode: {snap['mode']} · Equity: ₹{snap['equity_inr']:.2f}\n"
+            f"Trades: {snap['trades']} · Realized PnL: ₹{snap['realized_pnl_inr']:+.2f}\n"
+            f"Sent at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}",
+            raise_on_error=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Telegram error: {e}")
+    await ENGINE.store.log("INFO", f"Telegram test alert sent via @{me.get('username', '?')}")
+    return {"ok": True, "bot": me.get("username"), "status": tg.status()}
+
+
+@api.post("/telegram/summary")
+async def telegram_summary_now():
+    """Pushes the hourly summary immediately."""
+    if not ENGINE.telegram.enabled:
+        raise HTTPException(status_code=400, detail="Telegram not configured")
+    try:
+        await ENGINE._send_hourly_summary(raise_on_error=True)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Telegram error: {e}")
+    return {"ok": True, "status": ENGINE.telegram.status()}
 
 
 @api.post("/coinswitch/check")

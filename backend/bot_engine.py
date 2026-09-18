@@ -555,22 +555,75 @@ class LiveCoinSwitchTickerPoller:
 
 
 class TelegramReporter:
+    """Outbound-only Telegram Bot API client (sendMessage, HTML parse mode).
+    Serialises sends through a lock with a small gap to respect the ~1 msg/s per-chat limit.
+    """
     def __init__(self, token: str, chat_id: str) -> None:
         self.token = token
         self.chat_id = chat_id
         self.enabled = bool(token and chat_id)
+        self.sent_count = 0
+        self.fail_count = 0
+        self.last_sent_ts: Optional[float] = None
+        self.last_error: str = ""
+        self.bot_username: str = ""
+        self._lock = asyncio.Lock()
 
-    async def send(self, text: str) -> None:
+    def status(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "chat_id_masked": (self.chat_id[:2] + "…" + self.chat_id[-3:]) if self.chat_id else "",
+            "bot_username": self.bot_username,
+            "sent_count": self.sent_count,
+            "fail_count": self.fail_count,
+            "last_sent_ts": self.last_sent_ts,
+            "last_error": self.last_error,
+        }
+
+    async def get_me(self) -> Dict[str, Any]:
+        if not self.enabled:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured")
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
+            async with s.get(f"https://api.telegram.org/bot{self.token}/getMe") as r:
+                d = await r.json(content_type=None)
+        if not d.get("ok"):
+            raise RuntimeError(f"getMe failed ({r.status}): {d.get('description', d)}")
+        self.bot_username = d["result"].get("username", "")
+        return d["result"]
+
+    async def send(self, text: str, raise_on_error: bool = False) -> bool:
         if not self.enabled:
             logger.info(f"[TELEGRAM-MUTED] {text}")
-            return
+            if raise_on_error:
+                raise RuntimeError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured in backend/.env")
+            return False
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
-                await s.post(url, json={"chat_id": self.chat_id, "text": text,
-                                        "parse_mode": "HTML", "disable_web_page_preview": True})
-        except Exception as e:
-            logger.warning(f"telegram send failed: {e}")
+        payload = {"chat_id": self.chat_id, "text": text,
+                   "parse_mode": "HTML", "disable_web_page_preview": True}
+        async with self._lock:
+            try:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
+                    async with s.post(url, json=payload) as r:
+                        d = await r.json(content_type=None)
+                if r.status == 429:
+                    retry = float((d.get("parameters") or {}).get("retry_after", 1))
+                    await asyncio.sleep(min(retry, 5))
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
+                        async with s.post(url, json=payload) as r:
+                            d = await r.json(content_type=None)
+                if not d.get("ok"):
+                    raise RuntimeError(f"HTTP {r.status}: {d.get('description', d)}")
+                self.sent_count += 1
+                self.last_sent_ts = time.time()
+                self.last_error = ""
+                await asyncio.sleep(0.05)
+                return True
+            except Exception as e:
+                self.fail_count += 1
+                self.last_error = str(e)
+                logger.warning(f"telegram send failed: {e}")
+                if raise_on_error: raise
+                return False
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +670,8 @@ class BotEngine:
         self._last_spread_pct: Dict[str, float] = {c: 0.0 for c in cfg.coins}
         # sparklines: last 60 spread% points per coin
         self._sparkline: Dict[str, List[float]] = {c: [] for c in cfg.coins}
+        # heatmap: coin -> {epoch_sec: signed max |spread|/hurdle ratio in that second}
+        self._heat: Dict[str, Dict[int, float]] = {c: {} for c in cfg.coins}
         self._live_missing_keys_warned = False
         self._stale_no_keys_warned = False
 
@@ -733,6 +788,25 @@ class BotEngine:
         n = max(1, self.cfg.num_slots)
         return self.equity_inr / n
 
+    # --- heatmap ---------------------------------------------------------------
+    HEAT_WINDOW_S = 60
+    NEAR_HURDLE_RATIO = 0.8
+
+    def _record_heat(self, coin: str, gross_pct: float) -> None:
+        ratio = gross_pct / max(self.hurdle_pct(), 1e-9)
+        sec = int(time.time())
+        buckets = self._heat[coin]
+        prev = buckets.get(sec, 0.0)
+        if abs(ratio) >= abs(prev): buckets[sec] = ratio
+        if len(buckets) > self.HEAT_WINDOW_S + 5:
+            cutoff = sec - self.HEAT_WINDOW_S
+            for k in [k for k in buckets if k < cutoff]: del buckets[k]
+
+    def _heat_series(self, coin: str) -> List[float]:
+        now = int(time.time())
+        b = self._heat.get(coin, {})
+        return [round(b.get(s, 0.0), 3) for s in range(now - self.HEAT_WINDOW_S + 1, now + 1)]
+
     # --- signal / scan -------------------------------------------------------
     async def _scan_loop(self) -> None:
         try:
@@ -753,6 +827,7 @@ class BotEngine:
         self._last_spread_pct[coin] = gross_pct
         sp = self._sparkline[coin]; sp.append(gross_pct)
         if len(sp) > 60: self._sparkline[coin] = sp[-60:]
+        self._record_heat(coin, gross_pct)
 
         # skip if slot already occupied
         if await self.store.get_open(coin):
@@ -979,7 +1054,7 @@ class BotEngine:
                 await self._send_hourly_summary()
         except asyncio.CancelledError: pass
 
-    async def _send_hourly_summary(self) -> None:
+    async def _send_hourly_summary(self, raise_on_error: bool = False) -> None:
         wr = (self.win_count / self.trade_count * 100.0) if self.trade_count else 0.0
         avg_hold = self.total_hold_sec / self.trade_count if self.trade_count else 0.0
         avg_lat = self.total_exec_latency_ms / self.trade_count if self.trade_count else 0.0
@@ -991,7 +1066,7 @@ class BotEngine:
             f"Avg hold: {avg_hold:.1f}s  |  Avg exec latency: {avg_lat:.0f}ms\n"
             f"Mode: {'PAPER' if self.cfg.paper_trading else 'LIVE'}"
         )
-        await self.telegram.send(msg)
+        await self.telegram.send(msg, raise_on_error=raise_on_error)
 
     # --- snapshot for API ----------------------------------------------------
     def snapshot(self) -> Dict[str, Any]:
@@ -1022,6 +1097,7 @@ class BotEngine:
         out = []
         for c in self.cfg.coins:
             leader = self._leader(c); lagg = self._laggard(c)
+            heat = self._heat_series(c)
             out.append({
                 "coin": c,
                 "binance_bid": round(leader.bid, 6) if leader else None,
@@ -1032,5 +1108,8 @@ class BotEngine:
                 "signal_state": self._last_signal_state.get(c, "WAITING"),
                 "in_trade": c in self.store.open,
                 "sparkline": list(self._sparkline.get(c, [])),
+                "heat": heat,
+                "near_hurdle_hits_60s": sum(1 for r in heat if abs(r) >= self.NEAR_HURDLE_RATIO),
+                "peak_ratio_60s": round(max((abs(r) for r in heat), default=0.0), 3),
             })
         return out

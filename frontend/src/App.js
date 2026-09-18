@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { Activity, Zap, TrendingUp, TrendingDown, Play, Square, RefreshCw, Radio, Cpu, Wallet, Timer, Target } from "lucide-react";
+import { Activity, Zap, TrendingUp, TrendingDown, Play, Square, RefreshCw, Radio, Cpu, Wallet, Timer, Target, Send, Flame } from "lucide-react";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, ResponsiveContainer } from "recharts";
 import "@/App.css";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
@@ -40,6 +41,95 @@ function StatCard({ label, value, sub, accent = "cyan", testId, icon }) {
     </div>
   );
 }
+const heatColor = (r) => {
+  const a = Math.min(Math.abs(r || 0), 1.2);
+  if (a < 0.05) return "#1A2030";
+  const alpha = 0.18 + Math.min(a, 1) * 0.82;
+  return r >= 0 ? `rgba(16,185,129,${alpha.toFixed(2)})` : `rgba(239,68,68,${alpha.toFixed(2)})`;
+};
+
+function HeatBar({ heat = [], coin }) {
+  const cells = heat.length ? heat : Array(60).fill(0);
+  return (
+    <div data-testid={`spread-heat-bar-${coin}`} className="mt-2 grid gap-px" style={{gridTemplateColumns: `repeat(${cells.length}, minmax(0, 1fr))`}} title="60s heat: |spread| vs hurdle, oldest → newest">
+      {cells.map((r, i) => (
+        <div key={i} className={`h-2 rounded-[1px] ${Math.abs(r) >= 1 ? "shadow-[0_0_4px_rgba(255,255,255,0.35)]" : ""}`} style={{backgroundColor: heatColor(r)}} />
+      ))}
+    </div>
+  );
+}
+
+function EquityCurveChart({ points = [], start }) {
+  const data = points.map((p) => ({ t: p.ts * 1000, equity: Number(p.equity) }));
+  const last = data.length ? data[data.length - 1].equity : start;
+  const up = (last ?? 0) >= (start ?? 0);
+  const color = up ? "#10B981" : "#EF4444";
+  const vals = data.map((d) => d.equity).concat([start || 0]);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const pad = Math.max((max - min) * 0.15, (start || 4000) * 0.0025);
+  const fmtT = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return (
+    <div data-testid="equity-curve-chart-card" className="rounded-lg border border-[#1E2638] bg-[#121721] p-4 sm:p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="font-semibold text-slate-200" style={{fontFamily:"Outfit, sans-serif"}}>Equity Curve</h3>
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">5s samples · baseline ₹{(start || 0).toLocaleString("en-IN")}</div>
+        </div>
+        <div data-testid="equity-curve-last-value" className={`font-mono text-lg font-bold ${up ? "text-emerald-400" : "text-rose-400"}`}>{fmtINR(last)}</div>
+      </div>
+      <div className="h-48 sm:h-56">
+        {data.length < 2 ? (
+          <div className="h-full grid place-items-center text-slate-500 text-xs font-mono">Collecting equity samples…</div>
+        ) : (
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id="eqFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={color} stopOpacity={0.35} />
+                  <stop offset="100%" stopColor={color} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <XAxis dataKey="t" type="number" domain={["dataMin", "dataMax"]} tickFormatter={fmtT} tick={{ fill: "#64748B", fontSize: 10, fontFamily: "monospace" }} axisLine={{ stroke: "#1E2638" }} tickLine={false} minTickGap={48} />
+              <YAxis domain={[min - pad, max + pad]} tickFormatter={(v) => `₹${Math.round(v)}`} tick={{ fill: "#64748B", fontSize: 10, fontFamily: "monospace" }} axisLine={false} tickLine={false} width={64} />
+              <Tooltip contentStyle={{ background: "#0A0D12", border: "1px solid #1E2638", borderRadius: 6, fontSize: 11, fontFamily: "monospace" }} labelStyle={{ color: "#94A3B8" }} itemStyle={{ color }} labelFormatter={(t) => new Date(t).toLocaleTimeString()} formatter={(v) => [fmtINR(v), "Equity"]} />
+              <ReferenceLine y={start} stroke="#475569" strokeDasharray="4 4" />
+              <Area type="monotone" dataKey="equity" stroke={color} strokeWidth={2} fill="url(#eqFill)" isAnimationActive={false} dot={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TelegramPanel({ tg, onTest, onSummary, result }) {
+  const ok = tg?.enabled;
+  return (
+    <div data-testid="telegram-alerts-panel" className="mt-4 pt-4 border-t border-[#1E2638]">
+      <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+        <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono inline-flex items-center gap-1.5"><Send className="h-3 w-3"/> Telegram Alerts</span>
+        <div className="flex gap-2">
+          <button data-testid="telegram-send-test-btn" onClick={onTest} disabled={!ok || result?.loading} className="px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-sky-700 hover:bg-sky-600 text-white transition-colors duration-150 disabled:opacity-40">Send test alert</button>
+          <button data-testid="telegram-send-summary-btn" onClick={onSummary} disabled={!ok || result?.loading} className="px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-slate-800 hover:bg-slate-700 text-slate-100 transition-colors duration-150 disabled:opacity-40">Summary now</button>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2 text-[10px] font-mono">
+        <span data-testid="telegram-status-badge" className={`px-2 py-0.5 rounded-full border uppercase tracking-wider ${ok ? "border-emerald-800 bg-emerald-950/40 text-emerald-300" : "border-rose-800 bg-rose-950/40 text-rose-300"}`}>{ok ? `CONFIGURED${tg.bot_username ? " · @" + tg.bot_username : ""}` : "NOT CONFIGURED"}</span>
+        {ok && <span data-testid="telegram-sent-count-badge" className="px-2 py-0.5 rounded-full border border-slate-700 text-slate-300">sent {tg.sent_count} · failed {tg.fail_count}</span>}
+        {ok && tg.last_sent_ts && <span className="px-2 py-0.5 rounded-full border border-slate-700 text-slate-400">last {new Date(tg.last_sent_ts*1000).toLocaleTimeString()}</span>}
+      </div>
+      {!ok && <div className="mt-2 text-[11px] text-slate-500 font-mono">Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in backend/.env and restart.</div>}
+      {result && (
+        <div data-testid="telegram-test-result" className={`mt-2 text-[11px] font-mono rounded border px-2 py-1.5 ${result.loading ? "border-slate-700 text-slate-400" : result.ok ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>
+          {result.loading ? "Sending…" : result.ok ? `✓ ${result.msg}` : `✗ ${result.error}`}
+        </div>
+      )}
+      {tg?.last_error && !result?.loading && <div data-testid="telegram-last-error" className="mt-1 text-[10px] font-mono text-rose-400/80 truncate">last error: {tg.last_error}</div>}
+    </div>
+  );
+}
+
+
 
 const SOURCE_STYLE = {
   COINSWITCH_WS: "border-emerald-800 bg-emerald-950/40 text-emerald-300",
@@ -174,6 +264,17 @@ function Dashboard() {
       setLiveCheck({ ok: false, error: e.response?.data?.detail || e.message });
     }
   };
+  const [tgResult, setTgResult] = useState(null);
+  const sendTelegram = async (kind) => {
+    setTgResult({ loading: true });
+    try {
+      const r = await axios.post(`${API}/telegram/${kind}`);
+      setTgResult({ ok: true, msg: kind === "test" ? `Test alert delivered via @${r.data.bot}` : "Hourly summary delivered" });
+    } catch (e) {
+      setTgResult({ ok: false, error: e.response?.data?.detail || e.message });
+    }
+    pull();
+  };
 
   const wr = status?.win_rate || 0;
   const pnlAccent = (status?.realized_pnl_inr || 0) >= 0 ? "green" : "red";
@@ -234,15 +335,20 @@ function Dashboard() {
                 <div key={sp.coin} data-testid={`spread-slot-card-${sp.coin}`} className="rounded-lg border border-[#1E2638] bg-[#121721] p-3 transition-colors duration-150 hover:bg-[#182030] hover:border-slate-700">
                   <div className="flex items-center justify-between mb-1">
                     <div className="font-bold text-sm tracking-wide">{sp.coin}<span className="text-slate-500 text-[10px] ml-1">/INR</span></div>
-                    <span className={stateBadge(sp.signal_state)}>{(sp.signal_state || "waiting").replace("_"," ")}</span>
+                    <div className="flex items-center gap-1">
+                      <span data-testid={`spread-near-hurdle-hits-${sp.coin}`} title="seconds in last 60s where |spread| ≥ 80% of hurdle" className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded border font-mono text-[10px] ${(sp.near_hurdle_hits_60s || 0) > 0 ? "border-amber-700 bg-amber-950/40 text-amber-300" : "border-[#1E2638] text-slate-500"}`}><Flame className="h-2.5 w-2.5"/>{sp.near_hurdle_hits_60s ?? 0}</span>
+                      <span className={stateBadge(sp.signal_state)}>{(sp.signal_state || "waiting").replace("_"," ")}</span>
+                    </div>
                   </div>
                   <div className="flex items-baseline justify-between">
                     <div className={`text-lg font-mono font-bold ${positive ? "text-emerald-400" : "text-rose-400"}`}>{sp.gross_spread_pct >= 0 ? "+" : ""}{(sp.gross_spread_pct ?? 0).toFixed(3)}%</div>
                     <Sparkline points={sp.sparkline || []} color={positive ? "#10B981" : "#EF4444"} width={72} height={20} />
                   </div>
+                  <HeatBar heat={sp.heat} coin={sp.coin} />
                   <div className="mt-1 grid grid-cols-2 gap-1 text-[10px] font-mono text-slate-500">
                     <div>BIN ask <span className="text-slate-300">{fmtNum(sp.binance_ask, 4)}</span></div>
                     <div>CSW bid <span className="text-slate-300">{fmtNum(sp.coinswitch_bid, 4)}</span></div>
+                    <div className="col-span-2">peak 60s <span data-testid={`spread-peak-ratio-${sp.coin}`} className="text-slate-300">{Math.round((sp.peak_ratio_60s || 0) * 100)}%</span> of hurdle</div>
                   </div>
                 </div>
               );
@@ -294,7 +400,9 @@ function Dashboard() {
 
         {/* Closed trades + Hourly summary side by side */}
         <section className="grid lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2">
+          <div className="lg:col-span-2 space-y-6">
+            <EquityCurveChart points={equity} start={status?.starting_capital_inr} />
+            <div>
             <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-slate-200 mb-3" style={{fontFamily:"Outfit, sans-serif"}}>Recent Closed Trades</h2>
             <div className="rounded-lg border border-[#1E2638] bg-[#121721] overflow-x-auto max-h-[420px] overflow-y-auto">
               <table data-testid="closed-trades-history-table" className="w-full text-xs font-mono">
@@ -326,6 +434,7 @@ function Dashboard() {
                   {!closed.length && <tr><td colSpan={8} className="text-center py-6 text-slate-500">No closed trades yet.</td></tr>}
                 </tbody>
               </table>
+            </div>
             </div>
           </div>
 
@@ -382,6 +491,7 @@ function Dashboard() {
                 </div>
               )}
             </div>
+            <TelegramPanel tg={telemetry?.telegram} result={tgResult} onTest={() => sendTelegram("test")} onSummary={() => sendTelegram("summary")} />
           </div>
 
           <div className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
