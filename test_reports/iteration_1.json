@@ -1,0 +1,26 @@
+{
+  "summary": "Backend smoke test for lead-lag arbitrage bot. Bot auto-started via lifespan, simulator generating trades. All 13 endpoints verified against public REACT_APP_BACKEND_URL.",
+  "tested_scope": ["backend", "integration"],
+  "passed": [
+    "GET /api/status: running=true, mode=PAPER, equity_inr=4067, hurdle_pct=0.15, trades=151, wins/losses populated, fx_usdt_inr=95.97",
+    "GET /api/spreads: 10 items with binance_bid/ask, coinswitch_bid/ask, gross_spread_pct, signal_state (IN_TRADE observed), sparkline array (~50 points), hurdle_pct present",
+    "GET /api/positions/open: multiple open positions with entry/target/stop/timeout, direction LONG & SHORT, INR contracts",
+    "GET /api/positions/closed: closed trades with gross_pnl_inr, fees_inr, net_pnl_inr, close_reason=TARGET_HIT observed",
+    "GET /api/config: fee %s, hurdle_pct=0.15, timeout=45s, stop_loss=0.35 present",
+    "PUT /api/config: updated stop_loss_pct 0.35->0.40 and reverted; response reflected new value",
+    "POST /api/bot/stop then GET /api/status shows running=false; POST /api/bot/start restarts running=true",
+    "POST /api/bot/mode {paper_trading:false} -> mode=LIVE; toggle back {paper_trading:true} -> mode=PAPER",
+    "POST /api/positions/SOL/close returned {ok:true}; POST /api/positions/FAKE123/close returned 404 with detail",
+    "GET /api/equity-curve: array of {ts,equity} points populated (growing from 4000)",
+    "GET /api/logs: TRADE-level entries with ts/level/msg (OPEN/CLOSE events)",
+    "GET /api/telemetry: ws_connected=true, fx_usdt_inr, avg_exec_latency_ms=151, mode, simulate=true",
+    "GET /api/hourly-summary: trades=158, wins=151, losses=7, win_rate=95.57, realized_pnl_inr, avg_hold_sec, avg_exec_latency_ms",
+    "System sanity: after ~30s runtime, 150+ trades opened & closed via simulator (hurdle gate firing as expected)"
+  ],
+  "failed": [],
+  "action_items": [],
+  "success_rate": {"backend": "100%", "frontend": "not tested (scope=backend only)"},
+  "retest_needed": false,
+  "full_testing_deferred": true,
+  "notes": "LIVE-mode order placement is intentionally stubbed per agent-to-agent note; only mode toggle response was validated. Simulator (fx-aware) is generating realistic spreads and hurdle triggers frequently."
+}
