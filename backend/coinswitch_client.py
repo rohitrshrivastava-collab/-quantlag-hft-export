@@ -55,7 +55,13 @@ class CoinSwitchFuturesClient:
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
 
     # ------------------------- signing / transport --------------------------
-    def _sign(self, method: str, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    def _sign(self, method: str, path: str,
+              params: Optional[Dict[str, Any]] = None) -> tuple:
+        """Return (headers, signed_path) for a signed request.
+
+        The signed_path is `path` plus urlencoded params (if any). Callers use
+        `base_url + signed_path` as the request URL and pass `headers` as-is.
+        """
         method = method.upper()
         if params:
             sep = "&" if "?" in path else "?"
@@ -63,19 +69,18 @@ class CoinSwitchFuturesClient:
         decoded = urllib.parse.unquote_plus(path)
         epoch = str(int(time.time() * 1000))
         sig = self._signer.sign((method + decoded + epoch).encode("utf-8")).hex()
-        return {
+        headers = {
             "Content-Type": "application/json",
             "X-AUTH-APIKEY": self.api_key,
             "X-AUTH-SIGNATURE": sig,
             "X-AUTH-EPOCH": epoch,
-            "_signed_path": path,   # internal — stripped before send
         }
+        return headers, path
 
     async def _request(self, method: str, path: str,
                        params: Optional[Dict[str, Any]] = None,
                        body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        headers = self._sign(method, path, params)
-        signed_path = headers.pop("_signed_path")
+        headers, signed_path = self._sign(method, path, params)
         url = self.base_url + signed_path
         async with aiohttp.ClientSession(timeout=self._timeout) as s:
             async with s.request(method, url, headers=headers,

@@ -438,6 +438,7 @@ class BotEngine:
         self._last_spread_pct: Dict[str, float] = {c: 0.0 for c in cfg.coins}
         # sparklines: last 60 spread% points per coin
         self._sparkline: Dict[str, List[float]] = {c: [] for c in cfg.coins}
+        self._live_missing_keys_warned = False
 
     # --- lifecycle -----------------------------------------------------------
     async def start(self) -> None:
@@ -544,7 +545,9 @@ class BotEngine:
         else:
             # -------- LIVE: place MARKET order on CoinSwitch PRO Futures --------
             if not self.coinswitch:
-                await self.store.log("ERROR", f"[LIVE] {coin} skipped — CoinSwitch keys missing.")
+                if not self._live_missing_keys_warned:
+                    await self.store.log("ERROR", "[LIVE] CoinSwitch keys missing — no orders will be placed until COINSWITCH_API_KEY/SECRET are set. Suppressing further per-coin warnings.")
+                    self._live_missing_keys_warned = True
                 return
             fx = max(self.fx.rate, 1e-6)
             # base-asset quantity (e.g. BTC units). Use Binance USDT price as ref

@@ -93,8 +93,14 @@ async def bot_stop():
 @api.post("/bot/mode")
 async def bot_mode(body: ModeUpdate):
     ENGINE.cfg.paper_trading = body.paper_trading
-    await ENGINE.store.log("INFO", f"Mode switched to {'PAPER' if body.paper_trading else 'LIVE'}")
-    return {"ok": True, "mode": "PAPER" if body.paper_trading else "LIVE"}
+    mode = "PAPER" if body.paper_trading else "LIVE"
+    warning = None
+    if not body.paper_trading and ENGINE.coinswitch is None:
+        warning = "CoinSwitch keys not configured — LIVE mode will not place orders. Set COINSWITCH_API_KEY/SECRET in backend/.env and restart the service."
+    # reset the once-per-flip warning latch so the next transition can log again
+    ENGINE._live_missing_keys_warned = False
+    await ENGINE.store.log("INFO", f"Mode switched to {mode}")
+    return {"ok": True, "mode": mode, "warning": warning}
 
 
 @api.get("/config")

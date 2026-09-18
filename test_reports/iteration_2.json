@@ -1,0 +1,31 @@
+{
+  "summary": "Backend-only regression + new CoinSwitch live-order plumbing tested via pytest against public REACT_APP_BACKEND_URL. 16/16 tests passed. All existing endpoints unchanged. New /api/coinswitch/check correctly returns 400 with 'CoinSwitch keys not configured in .env'. /api/telemetry now exposes coinswitch_client_ready=false (no keys in .env). LIVE-mode toggle with missing keys logs ERROR '[LIVE] {coin} skipped — CoinSwitch keys missing.' per coin cycle and does not crash the engine (bot remains running=true, no LIVE positions created); paper mode simulator continues to produce trades. Direct import of CoinSwitchFuturesClient works; Ed25519 signature (both GET-with-params and POST-no-params) verifies against derived public key, confirming signing format METHOD+urllib.parse.unquote_plus(path_with_query)+epoch_ms with body excluded.",
+  "tested_scope": ["backend", "integration"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "passed": [
+    "GET /api/status, /api/spreads, /api/positions/open, /api/positions/closed, /api/config, PUT /api/config, /api/logs, /api/equity-curve, /api/hourly-summary all 200 with expected {items:[...]} shape",
+    "POST /api/bot/stop then /api/bot/start toggles running flag",
+    "POST /api/bot/mode paper_trading:false -> LIVE; paper_trading:true -> PAPER",
+    "POST /api/positions/FAKECOIN_XYZ/close -> 404",
+    "GET /api/telemetry contains coinswitch_client_ready: false",
+    "POST /api/coinswitch/check -> 400 detail 'CoinSwitch keys not configured in .env'",
+    "LIVE toggle produces ERROR log entries '[LIVE] <coin> skipped — CoinSwitch keys missing.' (26 entries observed after ~4s), bot stays running, no crash",
+    "Paper simulator continues to open/close trades (trade counter increments over 25s window)",
+    "CoinSwitchFuturesClient importable; _sign() signature verifies via Ed25519 public key for GET+params and POST"
+  ],
+  "failed": [],
+  "test_report_links": ["/app/backend/tests/test_backend_iter2.py", "/app/test_reports/pytest/iter2.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "coinswitch_client._sign() leaks internal key '_signed_path' via the returned headers dict; caller must strip it before send (already done in _request but any external use of _sign as a helper would send this header to the exchange). Consider returning (headers, signed_path) tuple.",
+    "bot_engine.py _open_position LIVE branch logs '[LIVE] {coin} skipped — CoinSwitch keys missing.' on every candidate cycle — expected produces high log volume (~26 entries in a few seconds during LIVE mode without keys). Consider one-time WARN + suppress duplicates, or gate at loop entry.",
+    "Live mode has no preflight guard: switching to LIVE mode via /api/bot/mode succeeds even when ENGINE.coinswitch is None. Recommend /api/bot/mode invoke /api/coinswitch/check-style validation before flipping to LIVE, or at least return {warning: 'client_not_ready'} in the response."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter2.py"],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "not tested (scope=backend only)"},
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "iter2 pytest at /app/backend/tests/test_backend_iter2.py is the current regression suite. Response shapes are {items:[...]} for spreads/positions/logs/equity-curve/positions/closed. LIVE-mode branch is exercised via mode toggle + log verification only (no real CoinSwitch calls). If real keys are added later, /api/coinswitch/check should return {ok:true, wallet_balance:{...}} and coinswitch_client_ready should flip to true after service restart."
+}
