@@ -174,7 +174,22 @@ async def telemetry():
         "avg_exec_latency_ms": snap["avg_exec_latency_ms"],
         "mode": snap["mode"],
         "simulate": ENGINE.cfg.simulate,
+        "coinswitch_client_ready": ENGINE.coinswitch is not None,
     }
+
+
+@api.post("/coinswitch/check")
+async def coinswitch_check():
+    """Live-mode preflight: verifies CoinSwitch keys work by calling wallet_balance.
+    Returns 400 with detail if keys are missing/invalid.
+    """
+    if not ENGINE.coinswitch:
+        raise HTTPException(status_code=400, detail="CoinSwitch keys not configured in .env")
+    try:
+        wb = await ENGINE.coinswitch.wallet_balance()
+        return {"ok": True, "wallet_balance": wb}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"CoinSwitch API error: {e}")
 
 
 @api.get("/hourly-summary")

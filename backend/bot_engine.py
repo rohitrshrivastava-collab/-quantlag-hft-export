@@ -33,6 +33,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
 
+from coinswitch_client import CoinSwitchError, CoinSwitchFuturesClient
+
 logger = logging.getLogger("bot_engine")
 
 
@@ -65,6 +67,10 @@ class BotConfig:
     telegram_chat_id: str = ""
     binance_ws_url: str = "wss://fstream.binance.com/stream"
     coinswitch_ws_url: str = ""            # user supplies from CoinSwitch docs
+    coinswitch_base_url: str = "https://coinswitch.co"
+    coinswitch_api_key: str = ""
+    coinswitch_api_secret: str = ""
+    live_order_timeout_s: float = 5.0      # max time to wait for fill status
     simulate: bool = True                  # force simulator (no real exchange creds)
 
     @classmethod
@@ -90,6 +96,10 @@ class BotConfig:
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
             coinswitch_ws_url=os.environ.get("COINSWITCH_WS_URL", ""),
+            coinswitch_base_url=os.environ.get("COINSWITCH_BASE_URL", "https://coinswitch.co"),
+            coinswitch_api_key=os.environ.get("COINSWITCH_API_KEY", ""),
+            coinswitch_api_secret=os.environ.get("COINSWITCH_API_SECRET", ""),
+            live_order_timeout_s=_f("LIVE_ORDER_TIMEOUT_S", 5.0),
             simulate=_b("SIMULATE_MARKET", True),
         )
 
@@ -130,6 +140,8 @@ class Position:
     fees_inr: float = 0.0
     net_pnl_inr: float = 0.0
     close_reason: Optional[str] = None
+    entry_order_id: Optional[str] = None
+    exit_order_id: Optional[str] = None
     exec_latency_ms: Optional[float] = None
 
 
@@ -323,6 +335,49 @@ class FXRateService:
 # ---------------------------------------------------------------------------
 # Telegram reporter
 # ---------------------------------------------------------------------------
+class LiveCoinSwitchTickerPoller:
+    """Fallback CoinSwitch PRO laggard feed via authenticated REST ticker polling.
+
+    Real HFT should use a WebSocket book stream — but until that is wired,
+    this gives the engine a functional laggard TopOfBook in live mode.
+
+    Cadence: ~0.5s between coin polls (~10 coins => ~5s per coin refresh).
+    Well below the 20 req/60s limit on any private endpoint.
+    """
+    def __init__(self, client, coins: List[str], fx_provider) -> None:
+        self.client = client
+        self.coins = coins
+        self._fx = fx_provider
+        self.book: Dict[str, TopOfBook] = {}
+        self._running = False
+
+    async def start(self) -> None:
+        self._running = True
+        asyncio.create_task(self._run())
+
+    def stop(self) -> None:
+        self._running = False
+
+    async def _run(self) -> None:
+        while self._running:
+            for c in self.coins:
+                if not self._running: break
+                try:
+                    r = await self.client.ticker(f"{c}USDT")
+                    d = (r or {}).get("data", {}) or r or {}
+                    bid = float(d.get("bid") or d.get("best_bid") or d.get("bid_price") or 0)
+                    ask = float(d.get("ask") or d.get("best_ask") or d.get("ask_price") or 0)
+                    if bid <= 0 or ask <= 0: continue
+                    fx = float(self._fx() or 0) or 1.0
+                    self.book[c] = TopOfBook(
+                        coin=c, bid=bid*fx, ask=ask*fx,
+                        ts_ms=int(time.time()*1000),
+                    )
+                except Exception as e:
+                    logger.debug(f"CoinSwitch ticker poll {c} failed: {e}")
+                await asyncio.sleep(0.5)
+
+
 class TelegramReporter:
     def __init__(self, token: str, chat_id: str) -> None:
         self.token = token
@@ -353,6 +408,21 @@ class BotEngine:
         self.simulator = MarketSimulator(cfg.coins, fx_provider=lambda: self.fx.rate, fx_ref=cfg.fx_usdt_inr) if cfg.simulate else None
         self.live_feed = None if cfg.simulate else LiveBinanceFeed(cfg.coins)
         self.telegram = TelegramReporter(cfg.telegram_bot_token, cfg.telegram_chat_id)
+        # CoinSwitch REST client — only built when we have both keys AND we're
+        # about to trade for real (paper mode still uses simulated fills).
+        self.coinswitch: Optional[CoinSwitchFuturesClient] = None
+        self.coinswitch_poller: Optional[LiveCoinSwitchTickerPoller] = None
+        if cfg.coinswitch_api_key and cfg.coinswitch_api_secret:
+            try:
+                self.coinswitch = CoinSwitchFuturesClient(
+                    api_key=cfg.coinswitch_api_key,
+                    secret_key=cfg.coinswitch_api_secret,
+                    base_url=cfg.coinswitch_base_url,
+                )
+                self.coinswitch_poller = LiveCoinSwitchTickerPoller(
+                    self.coinswitch, cfg.coins, lambda: self.fx.rate)
+            except Exception as e:
+                logger.warning(f"CoinSwitch client init failed (keys malformed?): {e}")
         self.running = False
         self.started_at: Optional[float] = None
         self.equity_inr = cfg.starting_capital_inr
@@ -376,6 +446,8 @@ class BotEngine:
         self.started_at = time.time()
         if self.simulator: await self.simulator.start()
         if self.live_feed: await self.live_feed.start()
+        if self.coinswitch_poller and not self.cfg.simulate:
+            await self.coinswitch_poller.start()
         await self.fx.start()
         self._tasks = [
             asyncio.create_task(self._scan_loop()),
@@ -392,6 +464,7 @@ class BotEngine:
         self._tasks = []
         if self.simulator: self.simulator.stop()
         if self.live_feed: self.live_feed.stop()
+        if self.coinswitch_poller: self.coinswitch_poller.stop()
         self.fx.stop()
         await self.store.log("INFO", "Bot stopped")
 
@@ -400,7 +473,9 @@ class BotEngine:
         return self.simulator.leader(coin) if self.simulator else self.live_feed.book.get(coin)
 
     def _laggard(self, coin: str) -> Optional[TopOfBook]:
-        return self.simulator.laggard(coin) if self.simulator else None  # CoinSwitch WS impl not shipped
+        if self.simulator: return self.simulator.laggard(coin)
+        if self.coinswitch_poller: return self.coinswitch_poller.book.get(coin)
+        return None
 
     def hurdle_pct(self) -> float:
         c = self.cfg
@@ -453,22 +528,70 @@ class BotEngine:
         signal_ts = time.time()
         size_inr = min(self.allocated_per_slot_inr(), self.equity_inr * 0.15)
         if size_inr < 50: return  # min lot guard
-        # Entry price = worst top-of-book (taker)
+        # Entry price (paper) = worst top-of-book (taker)
         entry_price = lagg.ask if direction == "LONG" else lagg.bid
         contracts = size_inr / entry_price
-        # target: catch-up to leader INR (mid), stop = symmetric hard stop
         target = leader_inr_mid
         stop = entry_price * (1 - self.cfg.stop_loss_pct/100.0) if direction == "LONG" \
                else entry_price * (1 + self.cfg.stop_loss_pct/100.0)
-        # simulate execution latency
-        latency_ms = random.uniform(80, 220) if self.cfg.paper_trading else 0.0
+        latency_ms = 0.0
+        entry_order_id: Optional[str] = None
+        entry_fee_inr = 0.0
+
         if self.cfg.paper_trading:
+            latency_ms = random.uniform(80, 220)
             await asyncio.sleep(latency_ms/1000.0)
         else:
-            # LIVE: real REST call would go here (Binance/CoinSwitch place order)
-            # deliberately not wired — user must plug CoinSwitch PRO REST API creds.
-            await self.store.log("WARN", f"[LIVE MODE] {coin} order placement stub; supply CoinSwitch REST client to enable.")
-            return
+            # -------- LIVE: place MARKET order on CoinSwitch PRO Futures --------
+            if not self.coinswitch:
+                await self.store.log("ERROR", f"[LIVE] {coin} skipped — CoinSwitch keys missing.")
+                return
+            fx = max(self.fx.rate, 1e-6)
+            # base-asset quantity (e.g. BTC units). Use Binance USDT price as ref
+            # since it's the freshest; CoinSwitch fill will get its own avg price.
+            usdt_size = size_inr / fx
+            qty = usdt_size / max(leader.mid, 1e-9)
+            symbol = f"{coin}USDT"
+            side = "BUY" if direction == "LONG" else "SELL"
+            t0 = time.perf_counter()
+            try:
+                placed = await self.coinswitch.place_order(
+                    symbol=symbol, side=side, order_type="MARKET",
+                    quantity=qty, reduce_only=False,
+                )
+                entry_order_id = (placed.get("data") or {}).get("order_id")
+                if not entry_order_id:
+                    await self.store.log("ERROR", f"[LIVE] {coin} place_order missing order_id: {placed}")
+                    return
+                filled = await self.coinswitch.wait_for_fill(
+                    entry_order_id, timeout_s=self.cfg.live_order_timeout_s)
+            except CoinSwitchError as e:
+                await self.store.log("ERROR", f"[LIVE] {coin} order rejected {e.status}: {e.body}")
+                return
+            except Exception as e:
+                await self.store.log("ERROR", f"[LIVE] {coin} order exception: {e}")
+                return
+            latency_ms = (time.perf_counter() - t0) * 1000.0
+            d = (filled.get("data") or {})
+            exec_qty = float(d.get("exec_quantity") or 0)
+            avg_px = float(d.get("avg_execution_price") or 0)
+            fee_usdt = float(d.get("execution_fee") or 0)
+            status = d.get("status", "")
+            if exec_qty <= 0 or avg_px <= 0:
+                await self.store.log(
+                    "WARN", f"[LIVE] {coin} order {status} exec_qty=0 order_id={entry_order_id}")
+                return
+            # translate to engine's INR bookkeeping using current FX
+            contracts = exec_qty                          # base-asset units
+            entry_price = avg_px * fx                     # INR-equivalent entry
+            size_inr = exec_qty * avg_px * fx             # actual filled INR notional
+            entry_fee_inr = fee_usdt * fx
+            target = leader_inr_mid
+            stop = entry_price * (1 - self.cfg.stop_loss_pct/100.0) if direction == "LONG" \
+                   else entry_price * (1 + self.cfg.stop_loss_pct/100.0)
+            await self.store.log(
+                "INFO",
+                f"[LIVE] {coin} filled {exec_qty} @ {avg_px} USDT ({status}) fee={fee_usdt} USDT")
 
         pos = Position(
             id=str(uuid.uuid4()),
@@ -482,6 +605,8 @@ class BotEngine:
             timeout_at=signal_ts + self.cfg.timeout_seconds,
             mode="PAPER" if self.cfg.paper_trading else "LIVE",
             exec_latency_ms=latency_ms,
+            entry_order_id=entry_order_id,
+            fees_inr=entry_fee_inr,
         )
         await self.store.add_open(pos)
         await self.store.log("TRADE", f"OPEN {direction} {coin} ₹{size_inr:.2f} @ {entry_price:.6f}")
@@ -517,14 +642,54 @@ class BotEngine:
         if reason: await self._close_position(pos, cur, reason)
 
     async def _close_position(self, pos: Position, price: float, reason: str) -> None:
+        exit_fee_inr: Optional[float] = None
+        exit_order_id: Optional[str] = None
+        if pos.mode == "LIVE" and self.coinswitch:
+            # place reduce_only MARKET on opposite side
+            symbol = f"{pos.coin}USDT"
+            side = "SELL" if pos.direction == "LONG" else "BUY"
+            try:
+                placed = await self.coinswitch.place_order(
+                    symbol=symbol, side=side, order_type="MARKET",
+                    quantity=pos.contracts, reduce_only=True,
+                )
+                exit_order_id = (placed.get("data") or {}).get("order_id")
+                if exit_order_id:
+                    filled = await self.coinswitch.wait_for_fill(
+                        exit_order_id, timeout_s=self.cfg.live_order_timeout_s)
+                    d = (filled.get("data") or {})
+                    exec_qty = float(d.get("exec_quantity") or 0)
+                    avg_px = float(d.get("avg_execution_price") or 0)
+                    fee_usdt = float(d.get("execution_fee") or 0)
+                    if exec_qty > 0 and avg_px > 0:
+                        fx = max(self.fx.rate, 1e-6)
+                        price = avg_px * fx
+                        exit_fee_inr = fee_usdt * fx
+                        # partial-fill: shrink contracts to what actually closed
+                        if exec_qty < pos.contracts:
+                            pos.contracts = exec_qty
+                    await self.store.log(
+                        "INFO",
+                        f"[LIVE] {pos.coin} CLOSE fill exec={exec_qty} avg={avg_px} fee={fee_usdt} USDT")
+            except CoinSwitchError as e:
+                await self.store.log("ERROR", f"[LIVE] {pos.coin} close rejected {e.status}: {e.body}")
+            except Exception as e:
+                await self.store.log("ERROR", f"[LIVE] {pos.coin} close exception: {e}")
+
         pos.exit_price_inr = price
         pos.closed_at = time.time()
         pos.close_reason = reason
+        pos.exit_order_id = exit_order_id
         if pos.direction == "LONG":
             gross = (price - pos.entry_price_inr) * pos.contracts
         else:
             gross = (pos.entry_price_inr - price) * pos.contracts
-        fees = pos.size_inr * (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct) / 100.0
+        if pos.mode == "LIVE":
+            entry_fee = pos.fees_inr or 0.0  # captured at open
+            fees = entry_fee + (exit_fee_inr if exit_fee_inr is not None
+                                else pos.size_inr * self.cfg.exit_taker_fee_pct/100.0)
+        else:
+            fees = pos.size_inr * (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct) / 100.0
         pos.gross_pnl_inr = gross
         pos.fees_inr = fees
         pos.net_pnl_inr = gross - fees

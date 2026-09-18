@@ -134,23 +134,50 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
 | `FX_USDT_INR` | `84.5` | Fallback USDT/INR rate |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | *(empty)* | Optional Telegram alerts |
 | `BINANCE_API_KEY` / `_SECRET` | *(empty)* | Required only when disabling `PAPER_TRADING` |
-| `COINSWITCH_API_KEY` / `_SECRET` / `_WS_URL` | *(empty)* | Same |
+| `COINSWITCH_API_KEY` / `_SECRET` | *(empty)* | Ed25519 hex-encoded key pair from CoinSwitch PRO. Required when disabling `PAPER_TRADING`. Base URL defaults to `https://coinswitch.co` (override with `COINSWITCH_BASE_URL`) |
+| `LIVE_ORDER_TIMEOUT_S` | `5.0` | Max seconds to poll `get_order_status` before treating a live order as timed out |
+| `COINSWITCH_WS_URL` | *(empty)* | Optional — currently unused; poller uses REST ticker as fallback laggard feed in live mode |
 
 ## Going Live (checklist)
 
 1. Set `PAPER_TRADING=false` **and** `SIMULATE_MARKET=false`.
-2. Fill Binance + CoinSwitch keys and CoinSwitch WS URL.
-3. Implement the CoinSwitch REST place-order in `bot_engine.py::_open_position`
-   (stub raises a WARN log to remind you — deliberate safety guard).
+2. Fill `COINSWITCH_API_KEY` and `COINSWITCH_API_SECRET` (Ed25519 hex from
+   CoinSwitch API Portal → Futures API). IP-restrict the key to your
+   trading host.
+3. Verify connectivity: `curl -X POST $BASE_URL/api/coinswitch/check`
+   should return `{"ok": true, ...}`. In the dashboard use the **Run check**
+   button in the config panel — it calls `wallet_balance` under real Ed25519
+   signing and confirms your keys work.
 4. Run at least **72 hours in paper mode** first to verify gross spreads
    consistently exceed the hurdle gate.
-5. Deploy on EC2 Mumbai for RTT symmetry with CoinSwitch.
+5. Deploy on EC2 Mumbai (`ap-south-1`) for RTT symmetry with CoinSwitch.
+
+## Live-mode order path (already wired)
+
+`backend/coinswitch_client.py` is an async Ed25519-signed client covering:
+`wallet_balance`, `positions`, `instrument_info`, `ticker`, `order_book`,
+`place_order`, `get_order_status`, `cancel_order`, `cancel_all_open_orders`.
+
+- **Entry** (`_open_position` LIVE branch): converts INR slot allocation →
+  USDT quantity via current FX and Binance USDT price, submits a `MARKET`
+  order on `EXCHANGE_2` (`{COIN}USDT`), then polls `get_order_status`
+  until terminal (`EXECUTED` / `PARTIALLY_EXECUTED` are both accepted;
+  Futures treats partial as terminal per CoinSwitch docs). The engine
+  records the **actual** fill quantity, average fill price × FX, and real
+  `execution_fee`.
+- **Exit** (`_close_position` LIVE branch): submits an opposite-side
+  `MARKET` order with `reduce_only=true` for the exact filled quantity —
+  handles partial closes by shrinking `pos.contracts` to whatever actually
+  executed.
+- **Laggard feed in live mode**: `LiveCoinSwitchTickerPoller` refreshes each
+  coin's `ticker` every ~5 s. Replace with a real WS book stream when
+  available.
 
 ## Safety notes
 
-- The `LIVE` order path is intentionally left as a stub — you must wire
-  CoinSwitch's authenticated REST/WS place-order call yourself against their
-  current API version. This prevents accidental live trading with
-  placeholder credentials.
 - All exchange API keys should be **IP-restricted** to your EC2 elastic IP
   and scoped to Futures trading only (no withdrawals).
+- Live entries use `MARKET` orders — set `HURDLE_EXTRA_PCT` conservatively to
+  absorb worst-case taker slippage.
+- Live exits use `reduce_only=true` — they can never accidentally flip your
+  position to the opposite side.

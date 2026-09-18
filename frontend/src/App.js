@@ -61,6 +61,7 @@ function Dashboard() {
   const [equity, setEquity] = useState([]);
   const [saving, setSaving] = useState(false);
   const [cfgDraft, setCfgDraft] = useState(null);
+  const [liveCheck, setLiveCheck] = useState(null);
 
   const pull = async () => {
     try {
@@ -116,6 +117,15 @@ function Dashboard() {
     });
     setSaving(false);
     pull();
+  };
+  const runLiveCheck = async () => {
+    setLiveCheck({ loading: true });
+    try {
+      const r = await axios.post(`${API}/coinswitch/check`);
+      setLiveCheck({ ok: true, data: r.data });
+    } catch (e) {
+      setLiveCheck({ ok: false, error: e.response?.data?.detail || e.message });
+    }
   };
 
   const wr = status?.win_rate || 0;
@@ -312,6 +322,17 @@ function Dashboard() {
             <button data-testid="config-save-settings-btn" disabled={saving} onClick={saveCfg} className="mt-4 w-full py-2 rounded-full bg-cyan-500 hover:bg-cyan-400 text-slate-900 text-xs font-bold uppercase tracking-widest transition-colors duration-150 disabled:opacity-50">
               {saving ? "Saving…" : "Save Settings"}
             </button>
+            <div className="mt-4 pt-4 border-t border-[#1E2638]">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">CoinSwitch REST</span>
+                <button data-testid="coinswitch-live-check-btn" onClick={runLiveCheck} className="px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-slate-800 hover:bg-slate-700 text-slate-100 transition-colors duration-150">Run check</button>
+              </div>
+              {liveCheck && (
+                <div data-testid="coinswitch-live-check-result" className={`text-[11px] font-mono rounded border px-2 py-1.5 ${liveCheck.loading ? "border-slate-700 text-slate-400" : liveCheck.ok ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>
+                  {liveCheck.loading ? "Calling wallet_balance…" : liveCheck.ok ? "✓ CoinSwitch API reachable · keys valid" : `✗ ${liveCheck.error}`}
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
