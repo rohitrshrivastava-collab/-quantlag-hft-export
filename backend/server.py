@@ -5,8 +5,12 @@ exposes REST endpoints under /api/* consumed by the React dashboard.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
+import json
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,14 +19,20 @@ from typing import Any, Dict, List, Optional
 from dataclasses import asdict
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 from bot_engine import BotConfig, BotEngine
+from verdict import evaluate as evaluate_verdict
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
+sys.path.insert(0, str(ROOT_DIR.parent))
+from benchmark.latency_bench import LatencyBenchmark  # noqa: E402
+
+BENCH_RESULT_PATH = ROOT_DIR.parent / "benchmark" / "last_result.json"
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -156,9 +166,126 @@ async def positions_close(coin: str):
 
 
 @api.get("/positions/closed")
-async def positions_closed(limit: int = 200):
+async def positions_closed(limit: int = 200, coin: Optional[str] = None):
     items = [asdict(p) for p in await ENGINE.store.all_closed(limit=limit)]
+    if coin:
+        items = [p for p in items if p["coin"] == coin.upper()]
     return {"items": items}
+
+
+CSV_COLUMNS = ["id", "coin", "direction", "mode", "size_inr", "contracts", "entry_price_inr", "exit_price_inr",
+               "binance_ref_usdt", "target_price_inr", "stop_price_inr", "opened_at", "closed_at",
+               "gross_pnl_inr", "fees_inr", "net_pnl_inr", "close_reason", "exec_latency_ms",
+               "entry_order_id", "exit_order_id"]
+
+
+@api.get("/positions/closed/export.csv")
+async def positions_closed_csv(coin: Optional[str] = None):
+    rows = [asdict(p) for p in await ENGINE.store.all_closed(limit=5000)]
+    if coin:
+        rows = [r for r in rows if r["coin"] == coin.upper()]
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=CSV_COLUMNS + ["opened_at_iso", "closed_at_iso", "hold_sec"], extrasaction="ignore")
+    w.writeheader()
+    for r in rows:
+        r["opened_at_iso"] = datetime.fromtimestamp(r["opened_at"], tz=timezone.utc).isoformat()
+        r["closed_at_iso"] = datetime.fromtimestamp(r["closed_at"], tz=timezone.utc).isoformat() if r.get("closed_at") else ""
+        r["hold_sec"] = round(r["closed_at"] - r["opened_at"], 2) if r.get("closed_at") else ""
+        w.writerow(r)
+    fname = f"quantlag_trades_{coin.upper() if coin else 'all'}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv"
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@api.post("/coins/{coin}/pause")
+async def coin_pause(coin: str):
+    if not ENGINE.set_paused(coin.upper(), True):
+        raise HTTPException(status_code=404, detail="unknown coin")
+    await ENGINE.store.log("WARN", f"{coin.upper()} slot PAUSED — no new entries (open position still managed)")
+    return {"ok": True, "coin": coin.upper(), "paused": True, "paused_coins": sorted(ENGINE.paused)}
+
+
+@api.post("/coins/{coin}/resume")
+async def coin_resume(coin: str):
+    if not ENGINE.set_paused(coin.upper(), False):
+        raise HTTPException(status_code=404, detail="unknown coin")
+    await ENGINE.store.log("INFO", f"{coin.upper()} slot RESUMED")
+    return {"ok": True, "coin": coin.upper(), "paused": False, "paused_coins": sorted(ENGINE.paused)}
+
+
+@api.get("/hurdle/simulate")
+async def hurdle_simulate(hurdle_pct: float, window_s: int = 600):
+    if hurdle_pct <= 0 or hurdle_pct > 10:
+        raise HTTPException(status_code=400, detail="hurdle_pct must be in (0, 10]")
+    draft = ENGINE.hurdle_simulate(hurdle_pct, window_s)
+    current = ENGINE.hurdle_simulate(ENGINE.hurdle_pct(), window_s)
+    return {"draft": draft, "current": current}
+
+
+# ------------------------- Benchmark ------------------------------------------
+BENCH: Dict[str, Any] = {"running": False, "bench": None, "task": None, "result": None, "error": None,
+                         "started_at": None}
+if BENCH_RESULT_PATH.exists():
+    try:
+        BENCH["result"] = json.loads(BENCH_RESULT_PATH.read_text())
+    except Exception:
+        pass
+
+
+class BenchmarkRequest(BaseModel):
+    duration_s: float = Field(default=60, ge=10, le=600)
+    symbols: List[str] = Field(default_factory=lambda: ["BTC", "ETH", "SOL"])
+
+
+async def _run_benchmark(bench: LatencyBenchmark) -> None:
+    try:
+        res = await bench.run()
+        BENCH["result"] = res
+        BENCH_RESULT_PATH.write_text(json.dumps(res))
+        await ENGINE.store.log("INFO", f"Latency benchmark finished ({bench.duration:.0f}s, {', '.join(bench.symbols)})")
+    except Exception as e:
+        BENCH["error"] = str(e)
+        await ENGINE.store.log("ERROR", f"Latency benchmark failed: {e}")
+    finally:
+        BENCH["running"] = False
+        BENCH["bench"] = None
+
+
+@api.post("/benchmark/run")
+async def benchmark_run(body: BenchmarkRequest):
+    if BENCH["running"]:
+        raise HTTPException(status_code=409, detail="benchmark already running")
+    bench = LatencyBenchmark(body.duration_s, [s.upper() for s in body.symbols][:5])
+    BENCH.update({"running": True, "bench": bench, "error": None, "started_at": datetime.now(timezone.utc).timestamp()})
+    BENCH["task"] = asyncio.create_task(_run_benchmark(bench))
+    await ENGINE.store.log("INFO", f"Latency benchmark started ({body.duration_s:.0f}s)")
+    return {"ok": True, "running": True, "duration_s": body.duration_s, "symbols": bench.symbols}
+
+
+@api.get("/benchmark/status")
+async def benchmark_status():
+    bench: Optional[LatencyBenchmark] = BENCH["bench"]
+    return {
+        "running": BENCH["running"],
+        "started_at": BENCH["started_at"],
+        "error": BENCH["error"],
+        "partial": bench.partial() if bench else None,
+        "result": BENCH["result"],
+    }
+
+
+@api.get("/benchmark/verdict")
+async def benchmark_verdict(coinswitch_fee_pct: Optional[float] = None, coindcx_fee_pct: Optional[float] = None):
+    if not BENCH["result"]:
+        raise HTTPException(status_code=404, detail="no benchmark result yet — run one first")
+    fees: Dict[str, float] = {}
+    if coinswitch_fee_pct is not None: fees["coinswitch"] = coinswitch_fee_pct
+    else: fees["coinswitch"] = ENGINE.cfg.entry_taker_fee_pct
+    if coindcx_fee_pct is not None: fees["coindcx"] = coindcx_fee_pct
+    return evaluate_verdict(
+        BENCH["result"], slippage_pct=ENGINE.cfg.slippage_buffer_pct, extra_pct=ENGINE.cfg.hurdle_extra_pct,
+        fees_pct=fees, slot_inr=ENGINE.allocated_per_slot_inr(), fx=ENGINE.fx.rate,
+    )
 
 
 @api.get("/equity-curve")

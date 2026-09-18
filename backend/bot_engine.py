@@ -670,8 +670,9 @@ class BotEngine:
         self._last_spread_pct: Dict[str, float] = {c: 0.0 for c in cfg.coins}
         # sparklines: last 60 spread% points per coin
         self._sparkline: Dict[str, List[float]] = {c: [] for c in cfg.coins}
-        # heatmap: coin -> {epoch_sec: signed max |spread|/hurdle ratio in that second}
+        # heatmap: coin -> {epoch_sec: signed max-|spread|% in that second} (kept HEAT_RETENTION_S)
         self._heat: Dict[str, Dict[int, float]] = {c: {} for c in cfg.coins}
+        self.paused: set = set()
         self._live_missing_keys_warned = False
         self._stale_no_keys_warned = False
 
@@ -779,6 +780,7 @@ class BotEngine:
             "rest_fallback": {
                 "available": self.coinswitch is not None,
                 "active": bool(self.coinswitch_poller and self.coinswitch_poller.running),
+                "rate_limiter": self.coinswitch.limiter_stats() if self.coinswitch else None,
             },
         }
 
@@ -792,22 +794,52 @@ class BotEngine:
 
     # --- heatmap ---------------------------------------------------------------
     HEAT_WINDOW_S = 60
+    HEAT_RETENTION_S = 600
     NEAR_HURDLE_RATIO = 0.8
 
     def _record_heat(self, coin: str, gross_pct: float) -> None:
-        ratio = gross_pct / max(self.hurdle_pct(), 1e-9)
         sec = int(time.time())
         buckets = self._heat[coin]
         prev = buckets.get(sec, 0.0)
-        if abs(ratio) >= abs(prev): buckets[sec] = ratio
-        if len(buckets) > self.HEAT_WINDOW_S + 5:
-            cutoff = sec - self.HEAT_WINDOW_S
+        if abs(gross_pct) >= abs(prev): buckets[sec] = gross_pct
+        if len(buckets) > self.HEAT_RETENTION_S + 5:
+            cutoff = sec - self.HEAT_RETENTION_S
             for k in [k for k in buckets if k < cutoff]: del buckets[k]
 
     def _heat_series(self, coin: str) -> List[float]:
         now = int(time.time())
+        h = max(self.hurdle_pct(), 1e-9)
         b = self._heat.get(coin, {})
-        return [round(b.get(s, 0.0), 3) for s in range(now - self.HEAT_WINDOW_S + 1, now + 1)]
+        return [round(b.get(s, 0.0) / h, 3) for s in range(now - self.HEAT_WINDOW_S + 1, now + 1)]
+
+    def hurdle_simulate(self, hurdle_pct: float, window_s: int = 600) -> Dict[str, Any]:
+        """Count would-be signals (contiguous runs of seconds with |spread| ≥ hurdle) per coin."""
+        now = int(time.time())
+        window_s = max(10, min(int(window_s), self.HEAT_RETENTION_S))
+        coins = []
+        total_ep = total_sec = 0
+        for c in self.cfg.coins:
+            b = self._heat.get(c, {})
+            episodes = secs = 0
+            prev_above = False
+            for s in range(now - window_s + 1, now + 1):
+                above = abs(b.get(s, 0.0)) >= hurdle_pct
+                if above:
+                    secs += 1
+                    if not prev_above: episodes += 1
+                prev_above = above
+            coins.append({"coin": c, "episodes": episodes, "seconds_above": secs})
+            total_ep += episodes; total_sec += secs
+        covered = min(window_s, int(now - (self.started_at or now)))
+        return {"hurdle_pct": hurdle_pct, "window_s": window_s, "covered_s": max(0, covered),
+                "total_episodes": total_ep, "total_seconds_above": total_sec, "coins": coins}
+
+    # --- kill switch -----------------------------------------------------------
+    def set_paused(self, coin: str, paused: bool) -> bool:
+        if coin not in self.cfg.coins: return False
+        if paused: self.paused.add(coin)
+        else: self.paused.discard(coin)
+        return True
 
     # --- signal / scan -------------------------------------------------------
     async def _scan_loop(self) -> None:
@@ -834,6 +866,9 @@ class BotEngine:
         # skip if slot already occupied
         if await self.store.get_open(coin):
             self._last_signal_state[coin] = "IN_TRADE"
+            return
+        if coin in self.paused:
+            self._last_signal_state[coin] = "PAUSED"
             return
 
         hurdle = self.hurdle_pct()
@@ -1117,6 +1152,7 @@ class BotEngine:
                 "gross_spread_pct": round(self._last_spread_pct.get(c, 0.0), 4),
                 "signal_state": self._last_signal_state.get(c, "WAITING"),
                 "in_trade": c in self.store.open,
+                "paused": c in self.paused,
                 "sparkline": list(self._sparkline.get(c, [])),
                 "heat": heat,
                 "near_hurdle_hits_60s": sum(1 for r in heat if abs(r) >= self.NEAR_HURDLE_RATIO),

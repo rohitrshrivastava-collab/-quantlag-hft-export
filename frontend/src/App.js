@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import axios from "axios";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { Activity, Zap, TrendingUp, TrendingDown, Play, Square, RefreshCw, Radio, Cpu, Wallet, Timer, Target, Send, Flame } from "lucide-react";
+import { Activity, Zap, TrendingUp, TrendingDown, Play, Square, RefreshCw, Radio, Cpu, Wallet, Timer, Target, Send, Flame, Pause, Download, Gauge, Trophy } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ReferenceLine, ResponsiveContainer } from "recharts";
 import "@/App.css";
 
@@ -129,6 +129,153 @@ function TelegramPanel({ tg, onTest, onSummary, result }) {
   );
 }
 
+const f1 = (v, d = 1) => (v === null || v === undefined) ? "—" : Number(v).toFixed(d);
+
+function HurdleTuner({ draftHurdle, sim }) {
+  const d = sim?.draft, c = sim?.current;
+  return (
+    <div data-testid="hurdle-tuner-panel" className="mt-4 pt-4 border-t border-[#1E2638]">
+      <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+        <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono inline-flex items-center gap-1.5"><Gauge className="h-3 w-3"/> Hurdle Tuner · last {d ? Math.round((d.covered_s || 0) / 60) : 0} min of real spreads</span>
+        <span data-testid="hurdle-tuner-draft-badge" className="px-2 py-0.5 rounded-full border border-purple-800 bg-purple-950/30 text-purple-300 font-mono text-[10px]">DRAFT {f1(draftHurdle, 3)}%</span>
+      </div>
+      {d ? (
+        <>
+          <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+            <div className="rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">would fire @ draft</div>
+              <div data-testid="hurdle-tuner-draft-count" className="text-xl font-bold text-purple-300">{d.total_episodes}<span className="text-slate-500 text-xs"> signals</span></div>
+              <div className="text-[10px] text-slate-500">{d.total_seconds_above}s above hurdle</div>
+            </div>
+            <div className="rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2">
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">@ saved {f1(c?.hurdle_pct, 3)}%</div>
+              <div data-testid="hurdle-tuner-current-count" className="text-xl font-bold text-slate-200">{c?.total_episodes ?? 0}<span className="text-slate-500 text-xs"> signals</span></div>
+              <div className="text-[10px] text-slate-500">{c?.total_seconds_above ?? 0}s above hurdle</div>
+            </div>
+          </div>
+          <div data-testid="hurdle-tuner-coin-row" className="mt-2 flex flex-wrap gap-1.5">
+            {d.coins.map((x) => (
+              <span key={x.coin} data-testid={`hurdle-tuner-coin-${x.coin}`} className={`font-mono text-[10px] px-1.5 py-0.5 rounded border ${x.episodes > 0 ? "border-purple-800 text-purple-300" : "border-[#1E2638] text-slate-500"}`}>{x.coin} {x.episodes}</span>
+            ))}
+          </div>
+          <div className="mt-1 text-[10px] text-slate-500 font-mono">A signal = a contiguous run of seconds where |spread| ≥ hurdle. Lower the draft until signals appear, then check they still clear fees.</div>
+        </>
+      ) : <div className="text-[11px] text-slate-500 font-mono">Collecting spread history…</div>}
+    </div>
+  );
+}
+
+const EX_ORDER = ["binance", "coinswitch", "coindcx"];
+
+function BenchmarkPanel({ bench, verdict, onRun, running, duration, setDuration, fees, setFees }) {
+  const res = bench?.result, part = bench?.partial;
+  const view = running && part ? part : res;
+  const rows = view ? EX_ORDER.filter((k) => view.exchanges?.[k]).map((k) => ({ key: k, ...view.exchanges[k] })) : [];
+  const progress = running && part ? Math.min(100, (part.elapsed_s / part.duration_s) * 100) : 0;
+  return (
+    <section data-testid="latency-benchmark-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <h3 className="font-semibold text-slate-200 inline-flex items-center gap-2" style={{fontFamily:"Outfit, sans-serif"}}><Activity className="h-4 w-4 text-cyan-400"/> Exchange Pair Benchmark</h3>
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">TCP RTT · WS tick-to-receipt · book quality · divergence vs Binance · run from this server (EC2 = production numbers)</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <select data-testid="benchmark-duration-select" value={duration} onChange={(e) => setDuration(Number(e.target.value))} disabled={running} className="bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 text-xs font-mono text-slate-200">
+            {[30, 60, 120, 300].map((s) => <option key={s} value={s}>{s}s</option>)}
+          </select>
+          <button data-testid="benchmark-run-btn" onClick={onRun} disabled={running} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-cyan-500 hover:bg-cyan-400 text-slate-900 text-xs font-bold uppercase tracking-widest transition-colors duration-150 disabled:opacity-50">
+            {running ? <><RefreshCw className="h-3.5 w-3.5 animate-spin"/> Running {Math.round(progress)}%</> : <><Play className="h-3.5 w-3.5"/> Run benchmark</>}
+          </button>
+        </div>
+      </div>
+      {running && <div className="h-1 w-full bg-[#1E2638] rounded mb-4 overflow-hidden"><div data-testid="benchmark-progress-bar" className="h-full bg-cyan-500 transition-[width] duration-500" style={{width: `${progress}%`}}/></div>}
+      {bench?.error && <div data-testid="benchmark-error" className="text-[11px] font-mono text-rose-300 mb-3">✗ {bench.error}</div>}
+      <div className="overflow-x-auto rounded border border-[#1E2638]">
+        <table data-testid="benchmark-results-table" className="w-full text-xs font-mono">
+          <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-[#1E2638]">
+            <tr>
+              <th className="text-left px-3 py-2">Exchange</th>
+              <th className="text-right px-3 py-2">TCP p50/p99</th>
+              <th className="text-right px-3 py-2">Tick→recv p50/p99</th>
+              <th className="text-right px-3 py-2">msg/s</th>
+              <th className="text-right px-3 py-2">max gap</th>
+              <th className="text-right px-3 py-2">rc</th>
+              <th className="text-right px-3 py-2">spread bps</th>
+              <th className="text-right px-3 py-2">depth ±10bps</th>
+              <th className="text-right px-3 py-2">div. p50/p99 bps</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key} data-testid={`benchmark-row-${r.key}`} className="border-b border-[#1E2638]/60">
+                <td className="px-3 py-2 text-slate-200 font-bold">{r.label}</td>
+                <td className="px-3 py-2 text-right text-cyan-300">{f1(r.tcp_rtt_ms?.p50, 0)} / {f1(r.tcp_rtt_ms?.p99, 0)} ms</td>
+                <td className="px-3 py-2 text-right text-amber-300">{f1(r.ws_tick_to_receipt_ms?.p50, 0)} / {f1(r.ws_tick_to_receipt_ms?.p99, 0)} ms</td>
+                <td className="px-3 py-2 text-right">{f1(r.ws_msgs_per_s, 1)}</td>
+                <td className="px-3 py-2 text-right">{f1(r.ws_max_gap_ms, 0)} ms</td>
+                <td className={`px-3 py-2 text-right ${r.ws_reconnects ? "text-rose-300" : "text-slate-400"}`}>{r.ws_reconnects}</td>
+                <td className="px-3 py-2 text-right">{f1(r.spread_bps_median, 2)}</td>
+                <td className="px-3 py-2 text-right">{r.depth_10bps_usdt_median == null ? "—" : `$${Math.round(r.depth_10bps_usdt_median).toLocaleString("en-US")}`}</td>
+                <td className="px-3 py-2 text-right text-purple-300">{r.divergence_bps ? `${f1(r.divergence_bps.p50, 2)} / ${f1(r.divergence_bps.p99, 2)}` : "—"}</td>
+              </tr>
+            ))}
+            {!rows.length && <tr><td colSpan={9} className="text-center py-6 text-slate-500">No benchmark yet — run one to compare Pair A (CoinSwitch) vs Pair B (CoinDCX).</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {res && <div className="mt-1 text-[10px] text-slate-500 font-mono">last run: {new Date(res.finished_at * 1000).toLocaleString()} · {res.duration_s}s · {res.symbols?.join(", ")} · host {res.host?.hostname}</div>}
+      <VerdictCard verdict={verdict} fees={fees} setFees={setFees} />
+    </section>
+  );
+}
+
+function VerdictCard({ verdict, fees, setFees }) {
+  if (!verdict) return null;
+  const feeInput = (k, label, tid) => (
+    <label className="block text-[10px] uppercase tracking-widest text-slate-500 font-mono">{label}
+      <input data-testid={tid} type="number" step="0.005" value={fees[k]} onChange={(e) => setFees({...fees, [k]: e.target.value})} className="mt-1 w-full bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1 font-mono text-slate-100 text-xs focus:outline-none focus:border-cyan-600"/>
+    </label>
+  );
+  return (
+    <div data-testid="benchmark-verdict-card" className="mt-4 rounded-lg border border-[#1E2638] bg-[#0A0D12] p-4">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono inline-flex items-center gap-1.5"><Trophy className="h-3 w-3 text-amber-400"/> Verdict</div>
+          <div data-testid="verdict-winner" className="text-xl font-bold text-emerald-300 mt-1" style={{fontFamily:"Outfit, sans-serif"}}>{verdict.winner_pair} · {verdict.winner_label}</div>
+          <div data-testid="verdict-confidence" className="text-[11px] font-mono text-slate-400 mt-1">margin {verdict.margin ?? "—"} pts · confidence: <span className="text-amber-300">{verdict.confidence}</span>{!verdict.any_qualified && <span className="text-rose-300"> · WARNING: no pair passed the reliability gates</span>}</div>
+        </div>
+        <div className="grid grid-cols-2 gap-2 w-full sm:w-64">
+          {feeInput("coinswitch", "CoinSwitch taker %", "verdict-fee-coinswitch-input")}
+          {feeInput("coindcx", "CoinDCX taker %", "verdict-fee-coindcx-input")}
+        </div>
+      </div>
+      <div className="mt-3 grid md:grid-cols-2 gap-3">
+        {verdict.rows.map((r) => (
+          <div key={r.exchange} data-testid={`verdict-row-${r.exchange}`} className={`rounded border p-3 text-xs font-mono ${r.exchange === verdict.winner ? "border-emerald-800 bg-emerald-950/20" : "border-[#1E2638]"}`}>
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-slate-200">{r.pair} · {r.exchange}</span>
+              <span data-testid={`verdict-score-${r.exchange}`} className="text-lg font-bold text-cyan-300">{r.score.total}<span className="text-slate-500 text-[10px]">/100</span></span>
+            </div>
+            <div className="mt-1 grid grid-cols-5 gap-1 text-[10px] text-slate-400">
+              {["net_edge", "fees", "latency", "book", "stability"].map((k) => <div key={k}><div className="uppercase tracking-wider text-slate-600">{k.replace("_"," ")}</div><div className="text-slate-200">{r.score[k]}</div></div>)}
+            </div>
+            <dl className="mt-2 space-y-0.5 text-[11px]">
+              <div className="flex justify-between"><dt className="text-slate-500">hurdle (2×fee+slip+extra)</dt><dd>{r.hurdle_pct}% = {r.hurdle_bps} bps</dd></div>
+              <div className="flex justify-between"><dt className="text-slate-500">opportunities / min</dt><dd className="text-purple-300">{r.opportunities_per_min}</dd></div>
+              <div className="flex justify-between"><dt className="text-slate-500">mean excess over hurdle</dt><dd>{r.mean_excess_bps} bps</dd></div>
+              <div className="flex justify-between"><dt className="text-slate-500">expected ₹ / hour (1 slot)</dt><dd className={r.expected_inr_per_hour > 0 ? "text-emerald-300" : "text-slate-300"}>₹{r.expected_inr_per_hour}</dd></div>
+              <div className="flex justify-between"><dt className="text-slate-500">est. order RTT</dt><dd>{r.exec_rtt_est_ms ?? "—"} ms {r.gate_exec ? "✓" : "✗"}</dd></div>
+              <div className="flex justify-between"><dt className="text-slate-500">feed gate</dt><dd>{r.gate_feed ? "✓ pass" : "✗ fail"}</dd></div>
+            </dl>
+            {r.flags.length > 0 && <div className="mt-2 text-[10px] text-amber-300">{r.flags.map((f) => <div key={f}>⚠ {f}</div>)}</div>}
+          </div>
+        ))}
+      </div>
+      <div className="mt-2 text-[10px] text-slate-500 font-mono">Rules: docs/EXCHANGE_PAIR_DECISION.md · run on the EC2 box that will trade, at 2–3 different hours, 300 s each, before committing capital.</div>
+    </div>
+  );
+}
+
 
 
 const SOURCE_STYLE = {
@@ -176,6 +323,7 @@ function FeedHealthStrip({ feed }) {
 }
 
 const stateBadge = (state) => {
+  if (state === "PAUSED") return "px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-slate-600 bg-slate-800/60 text-slate-300";
   const map = {
     WAITING: "bg-slate-800 text-slate-400 border-slate-700",
     HURDLE_MET_LONG: "bg-emerald-950/50 text-emerald-300 border-emerald-800 animate-pulse",
@@ -275,6 +423,48 @@ function Dashboard() {
     }
     pull();
   };
+  const [coinFilter, setCoinFilter] = useState("");
+  const togglePause = async (coin, paused) => {
+    await axios.post(`${API}/coins/${coin}/${paused ? "resume" : "pause"}`);
+    pull();
+  };
+  const [hurdleSim, setHurdleSim] = useState(null);
+  const draftHurdle = cfgDraft ? ["entry_taker_fee_pct", "exit_taker_fee_pct", "slippage_buffer_pct", "hurdle_extra_pct"].reduce((a, k) => a + (Number(cfgDraft[k]) || 0), 0) : null;
+  useEffect(() => {
+    if (!draftHurdle || draftHurdle <= 0) return;
+    let alive = true;
+    const go = async () => {
+      try { const r = await axios.get(`${API}/hurdle/simulate?hurdle_pct=${draftHurdle}&window_s=600`); if (alive) setHurdleSim(r.data); } catch (e) {}
+    };
+    go();
+    const id = setInterval(go, 3000);
+    return () => { alive = false; clearInterval(id); };
+  }, [draftHurdle]);
+  const [bench, setBench] = useState(null);
+  const [verdict, setVerdict] = useState(null);
+  const [benchDuration, setBenchDuration] = useState(60);
+  const [fees, setFees] = useState({ coinswitch: 0.05, coindcx: 0.075 });
+  useEffect(() => {
+    let alive = true;
+    const go = async () => {
+      try {
+        const r = await axios.get(`${API}/benchmark/status`);
+        if (!alive) return;
+        setBench(r.data);
+        if (r.data.result) {
+          const v = await axios.get(`${API}/benchmark/verdict?coinswitch_fee_pct=${Number(fees.coinswitch) || 0.05}&coindcx_fee_pct=${Number(fees.coindcx) || 0.075}`);
+          if (alive) setVerdict(v.data);
+        }
+      } catch (e) {}
+    };
+    go();
+    const id = setInterval(go, 2000);
+    return () => { alive = false; clearInterval(id); };
+  }, [fees]);
+  const runBenchmark = async () => {
+    try { await axios.post(`${API}/benchmark/run`, { duration_s: benchDuration, symbols: ["BTC", "ETH", "SOL"] }); }
+    catch (e) { setBench((b) => ({ ...(b || {}), error: e.response?.data?.detail || e.message })); }
+  };
 
   const wr = status?.win_rate || 0;
   const pnlAccent = (status?.realized_pnl_inr || 0) >= 0 ? "green" : "red";
@@ -336,6 +526,9 @@ function Dashboard() {
                   <div className="flex items-center justify-between mb-1">
                     <div className="font-bold text-sm tracking-wide">{sp.coin}<span className="text-slate-500 text-[10px] ml-1">/INR</span></div>
                     <div className="flex items-center gap-1">
+                      <button data-testid={`spread-pause-toggle-${sp.coin}`} onClick={() => togglePause(sp.coin, sp.paused)} title={sp.paused ? "Resume slot" : "Pause slot (no new entries)"} className={`h-5 w-5 grid place-items-center rounded border transition-colors duration-150 ${sp.paused ? "border-amber-700 bg-amber-950/40 text-amber-300 hover:bg-amber-900/40" : "border-[#1E2638] text-slate-500 hover:text-slate-200 hover:border-slate-600"}`}>
+                        {sp.paused ? <Play className="h-2.5 w-2.5"/> : <Pause className="h-2.5 w-2.5"/>}
+                      </button>
                       <span data-testid={`spread-near-hurdle-hits-${sp.coin}`} title="seconds in last 60s where |spread| ≥ 80% of hurdle" className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded border font-mono text-[10px] ${(sp.near_hurdle_hits_60s || 0) > 0 ? "border-amber-700 bg-amber-950/40 text-amber-300" : "border-[#1E2638] text-slate-500"}`}><Flame className="h-2.5 w-2.5"/>{sp.near_hurdle_hits_60s ?? 0}</span>
                       <span className={stateBadge(sp.signal_state)}>{(sp.signal_state || "waiting").replace("_"," ")}</span>
                     </div>
@@ -403,7 +596,16 @@ function Dashboard() {
           <div className="lg:col-span-2 space-y-6">
             <EquityCurveChart points={equity} start={status?.starting_capital_inr} />
             <div>
-            <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-slate-200 mb-3" style={{fontFamily:"Outfit, sans-serif"}}>Recent Closed Trades</h2>
+            <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+              <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-slate-200" style={{fontFamily:"Outfit, sans-serif"}}>Recent Closed Trades</h2>
+              <div className="flex items-center gap-2">
+                <select data-testid="closed-trades-coin-filter" value={coinFilter} onChange={(e) => setCoinFilter(e.target.value)} className="bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 text-xs font-mono text-slate-200">
+                  <option value="">All coins</option>
+                  {(config?.coins || []).map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <a data-testid="closed-trades-export-csv-btn" href={`${API}/positions/closed/export.csv${coinFilter ? `?coin=${coinFilter}` : ""}`} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-100 text-[10px] font-bold uppercase tracking-widest transition-colors duration-150"><Download className="h-3 w-3"/> Export CSV</a>
+              </div>
+            </div>
             <div className="rounded-lg border border-[#1E2638] bg-[#121721] overflow-x-auto max-h-[420px] overflow-y-auto">
               <table data-testid="closed-trades-history-table" className="w-full text-xs font-mono">
                 <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-[#1E2638] sticky top-0 bg-[#121721]">
@@ -419,7 +621,7 @@ function Dashboard() {
                   </tr>
                 </thead>
                 <tbody>
-                  {closed.map((p) => (
+                  {closed.filter((p) => !coinFilter || p.coin === coinFilter).map((p) => (
                     <tr key={p.id} className="border-b border-[#1E2638]/60 hover:bg-[#182030]">
                       <td className="px-3 py-2 font-bold text-slate-200">{p.coin}</td>
                       <td className="px-3 py-2"><span className={`text-[10px] font-bold ${p.direction === "LONG" ? "text-emerald-300" : "text-rose-300"}`}>{p.direction}</span></td>
@@ -431,7 +633,7 @@ function Dashboard() {
                       <td className="px-3 py-2 text-[10px] uppercase tracking-wider text-slate-500">{p.close_reason}</td>
                     </tr>
                   ))}
-                  {!closed.length && <tr><td colSpan={8} className="text-center py-6 text-slate-500">No closed trades yet.</td></tr>}
+                  {!closed.filter((p) => !coinFilter || p.coin === coinFilter).length && <tr><td colSpan={8} className="text-center py-6 text-slate-500">No closed trades{coinFilter ? ` for ${coinFilter}` : ""} yet.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -480,6 +682,7 @@ function Dashboard() {
             <button data-testid="config-save-settings-btn" disabled={saving} onClick={saveCfg} className="mt-4 w-full py-2 rounded-full bg-cyan-500 hover:bg-cyan-400 text-slate-900 text-xs font-bold uppercase tracking-widest transition-colors duration-150 disabled:opacity-50">
               {saving ? "Saving…" : "Save Settings"}
             </button>
+            <HurdleTuner draftHurdle={draftHurdle} sim={hurdleSim} />
             <div className="mt-4 pt-4 border-t border-[#1E2638]">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">CoinSwitch REST</span>
@@ -508,6 +711,8 @@ function Dashboard() {
             </div>
           </div>
         </section>
+
+        <BenchmarkPanel bench={bench} verdict={verdict} onRun={runBenchmark} running={!!bench?.running} duration={benchDuration} setDuration={setBenchDuration} fees={fees} setFees={setFees} />
 
         <footer className="pt-4 pb-8 text-center text-[10px] uppercase tracking-widest text-slate-600 font-mono">
           QuantLag HFT · Binance Futures leader → CoinSwitch PRO laggard · {status?.mode || "…"} mode

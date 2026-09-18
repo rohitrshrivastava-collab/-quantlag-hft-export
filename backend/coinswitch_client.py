@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import random
 import time
 import urllib.parse
 import uuid
@@ -27,9 +29,12 @@ from typing import Any, Dict, Optional
 import aiohttp
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from rate_limiter import RateLimiterGroup
+
 
 DEFAULT_BASE_URL = "https://coinswitch.co"
 EXCHANGE_ID = "EXCHANGE_2"
+ORDER_PATHS = ("/trade/api/v2/futures/order", "/trade/api/v2/futures/cancel-all")
 
 
 class CoinSwitchError(Exception):
@@ -53,6 +58,10 @@ class CoinSwitchFuturesClient:
         self._signer = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(secret_key))
         self.base_url = base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
+        orders_pm = int(os.environ.get("CS_RATE_LIMIT_ORDERS_PER_MIN", "20"))
+        default_pm = int(os.environ.get("CS_RATE_LIMIT_DEFAULT_PER_MIN", "60"))
+        self.limiter = RateLimiterGroup(default_pm, {p: orders_pm for p in ORDER_PATHS})
+        self.http_429_count = 0
 
     # ------------------------- signing / transport --------------------------
     def _sign(self, method: str, path: str,
@@ -79,7 +88,9 @@ class CoinSwitchFuturesClient:
 
     async def _request(self, method: str, path: str,
                        params: Optional[Dict[str, Any]] = None,
-                       body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       body: Optional[Dict[str, Any]] = None,
+                       _attempt: int = 0) -> Dict[str, Any]:
+        await self.limiter.acquire(path)
         headers, signed_path = self._sign(method, path, params)
         url = self.base_url + signed_path
         async with aiohttp.ClientSession(timeout=self._timeout) as s:
@@ -90,9 +101,19 @@ class CoinSwitchFuturesClient:
                     payload = json.loads(text) if text else {}
                 except Exception:
                     payload = {"raw": text}
+                if r.status == 429 and _attempt < 2:
+                    self.http_429_count += 1
+                    retry_after = float(r.headers.get("Retry-After") or 0) or (1.5 * (2 ** _attempt))
+                    await asyncio.sleep(retry_after + random.uniform(0.05, 0.4))
+                    return await self._request(method, path, params, body, _attempt + 1)
                 if r.status >= 400:
                     raise CoinSwitchError(r.status, payload)
                 return payload
+
+    def limiter_stats(self) -> Dict[str, Any]:
+        d = self.limiter.stats()
+        d["http_429_count"] = self.http_429_count
+        return d
 
     # ------------------------- account ---------------------------------------
     async def wallet_balance(self) -> Dict[str, Any]:
