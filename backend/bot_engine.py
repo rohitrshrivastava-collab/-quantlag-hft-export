@@ -21,6 +21,7 @@ via a pluggable `store` interface.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
@@ -72,6 +73,7 @@ class BotConfig:
     coinswitch_api_secret: str = ""
     live_order_timeout_s: float = 5.0      # max time to wait for fill status
     simulate: bool = True                  # force simulator (no real exchange creds)
+    laggard_stale_after_s: float = 10.0    # WS silence before REST fallback / STALE gate
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -101,6 +103,7 @@ class BotConfig:
             coinswitch_api_secret=os.environ.get("COINSWITCH_API_SECRET", ""),
             live_order_timeout_s=_f("LIVE_ORDER_TIMEOUT_S", 5.0),
             simulate=_b("SIMULATE_MARKET", True),
+            laggard_stale_after_s=_f("LAGGARD_STALE_AFTER_S", 10.0),
         )
 
 
@@ -263,13 +266,22 @@ class LiveBinanceFeed:
         self.coins = coins
         self.book: Dict[str, TopOfBook] = {}
         self._running = False
+        self.connected = False
+        self.last_msg_ts = 0.0
+        self.reconnects = 0
+        self._task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._run())
+        self._task = asyncio.create_task(self._run())
 
     def stop(self) -> None:
         self._running = False
+        self.connected = False
+        if self._task: self._task.cancel()
+
+    def last_msg_age_s(self) -> Optional[float]:
+        return (time.time() - self.last_msg_ts) if self.last_msg_ts else None
 
     async def _run(self) -> None:
         streams = "/".join(f"{c.lower()}usdt@bookTicker" for c in self.coins)
@@ -280,8 +292,10 @@ class LiveBinanceFeed:
                 async with aiohttp.ClientSession() as sess:
                     async with sess.ws_connect(url, heartbeat=20) as ws:
                         backoff = 1
+                        self.connected = True
                         async for msg in ws:
                             if msg.type != aiohttp.WSMsgType.TEXT: continue
+                            self.last_msg_ts = time.time()
                             data = msg.json().get("data", {})
                             sym = data.get("s", "")
                             if not sym.endswith("USDT"): continue
@@ -295,10 +309,161 @@ class LiveBinanceFeed:
                                 )
                             except Exception:
                                 continue
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.warning(f"Binance WS error: {e}; reconnecting in {backoff}s")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 30)
+            finally:
+                self.connected = False
+                if self._running: self.reconnects += 1
+
+
+COINSWITCH_WS_DEFAULT_URL = (
+    "wss://ws.coinswitch.co/pro/realtime-rates-socket/futures/exchange_2/"
+    "?EIO=4&transport=websocket"
+)
+COINSWITCH_WS_NAMESPACE = "/exchange_2"
+COINSWITCH_WS_BOOK_EVENT = "FETCH_ORDER_BOOK_CS_PRO"
+
+
+class LiveCoinSwitchBookFeed:
+    """CoinSwitch PRO Futures public order-book stream (Socket.IO v4 over raw WS).
+
+    Speaks the Engine.IO/Socket.IO wire protocol directly with aiohttp so no
+    extra dependency is needed:
+      server "0{...}"        -> we send "40/exchange_2,"          (join namespace)
+      server "40/exchange_2" -> we emit subscribe for each coin   ("42/exchange_2,[event,payload]")
+      server "2"             -> we reply "3"                        (ping/pong)
+      server "42/exchange_2,[FETCH_ORDER_BOOK_CS_PRO,{...}]" -> full book snapshot
+    Every push is a FULL snapshot; top-of-book is taken from bids[0]/asks[0].
+    Quotes are stored INR-scaled (× fx) to match the engine's laggard convention.
+    """
+    def __init__(self, coins: List[str], fx_provider, url: str = "") -> None:
+        self.coins = coins
+        self._fx = fx_provider
+        self.url = url or COINSWITCH_WS_DEFAULT_URL
+        self.book: Dict[str, TopOfBook] = {}
+        self.tick_recv_ts: Dict[str, float] = {}      # coin -> local epoch s of last snapshot
+        self.connected = False
+        self.subscribed = False
+        self.last_msg_ts = 0.0
+        self.connected_since = 0.0
+        self.reconnects = 0
+        self.msg_count = 0
+        self.wire_latency_ms: Optional[float] = None  # EMA of (recv - snapshot ts)
+        self.last_error: str = ""
+        self._rate_window: List[float] = []
+        self._running = False
+        self._task: Optional[asyncio.Task] = None
+
+    async def start(self) -> None:
+        if self._running: return
+        self._running = True
+        self._task = asyncio.create_task(self._run())
+
+    def stop(self) -> None:
+        self._running = False
+        self.connected = False
+        self.subscribed = False
+        if self._task: self._task.cancel()
+
+    # ---- health ------------------------------------------------------------
+    def last_msg_age_s(self) -> Optional[float]:
+        return (time.time() - self.last_msg_ts) if self.last_msg_ts else None
+
+    def coin_age_ms(self, coin: str) -> Optional[float]:
+        t = self.tick_recv_ts.get(coin)
+        return (time.time() - t) * 1000.0 if t else None
+
+    def fresh(self, coin: str, max_age_s: float) -> Optional[TopOfBook]:
+        t = self.tick_recv_ts.get(coin)
+        if not t or (time.time() - t) > max_age_s: return None
+        return self.book.get(coin)
+
+    def msgs_per_s(self) -> float:
+        cutoff = time.time() - 5.0
+        self._rate_window = [t for t in self._rate_window if t >= cutoff]
+        return len(self._rate_window) / 5.0
+
+    # ---- wire protocol -------------------------------------------------------
+    def _sub_frame(self, coin: str) -> str:
+        payload = json.dumps([COINSWITCH_WS_BOOK_EVENT, {"event": "subscribe", "pair": f"{coin}USDT"}])
+        return f"42{COINSWITCH_WS_NAMESPACE},{payload}"
+
+    def _on_snapshot(self, d: Dict[str, Any]) -> None:
+        d = d.get("data", d) if isinstance(d.get("data"), dict) else d
+        sym = str(d.get("symbol") or d.get("s") or "")
+        if not sym.endswith("USDT"): return
+        coin = sym[:-4]
+        bids, asks = d.get("bids") or [], d.get("asks") or []
+        if not bids or not asks: return
+        try:
+            bid, ask = float(bids[0][0]), float(asks[0][0])
+        except (TypeError, ValueError, IndexError):
+            return
+        if bid <= 0 or ask <= 0: return
+        now = time.time()
+        fx = float(self._fx() or 0) or 1.0
+        ts_ms = int(d.get("timestamp") or now * 1000)
+        self.book[coin] = TopOfBook(coin=coin, bid=bid * fx, ask=ask * fx, ts_ms=ts_ms)
+        self.tick_recv_ts[coin] = now
+        lat = max(0.0, now * 1000.0 - ts_ms)
+        if lat < 60_000:  # ignore absurd clock-skew values
+            self.wire_latency_ms = lat if self.wire_latency_ms is None else 0.9 * self.wire_latency_ms + 0.1 * lat
+
+    async def _run(self) -> None:
+        backoff = 1
+        while self._running:
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.ws_connect(self.url, heartbeat=None) as ws:
+                        self.connected = True
+                        self.connected_since = time.time()
+                        self.last_error = ""
+                        while self._running:
+                            msg = await ws.receive(timeout=60)
+                            if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
+                                raise ConnectionError(f"ws closed ({msg.type.name})")
+                            if msg.type != aiohttp.WSMsgType.TEXT: continue
+                            self.last_msg_ts = time.time()
+                            data: str = msg.data
+                            if data.startswith("0"):                       # engine.io OPEN
+                                await ws.send_str(f"40{COINSWITCH_WS_NAMESPACE},")
+                            elif data == "2":                              # ping
+                                await ws.send_str("3")
+                            elif data.startswith(f"40{COINSWITCH_WS_NAMESPACE}"):  # namespace CONNECT ack
+                                for c in self.coins:
+                                    await ws.send_str(self._sub_frame(c))
+                                self.subscribed = True
+                                backoff = 1
+                                logger.info(f"CoinSwitch WS subscribed to {len(self.coins)} books")
+                            elif data.startswith(f"42{COINSWITCH_WS_NAMESPACE},"):  # EVENT
+                                try:
+                                    evt = json.loads(data.split(",", 1)[1])
+                                except Exception:
+                                    continue
+                                if len(evt) < 2 or evt[0] != COINSWITCH_WS_BOOK_EVENT or not isinstance(evt[1], dict):
+                                    continue
+                                if "success" in evt[1] and "bids" not in evt[1]:
+                                    continue  # subscription ack
+                                self.msg_count += 1
+                                self._rate_window.append(self.last_msg_ts)
+                                self._on_snapshot(evt[1])
+                            elif data.startswith("44"):                    # namespace CONNECT_ERROR
+                                raise ConnectionError(f"namespace error: {data[:200]}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.last_error = str(e) or e.__class__.__name__
+                logger.warning(f"CoinSwitch WS error: {self.last_error}; reconnecting in {backoff}s")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+            finally:
+                self.connected = False
+                self.subscribed = False
+                if self._running: self.reconnects += 1
 
 
 class FXRateService:
@@ -350,32 +515,43 @@ class LiveCoinSwitchTickerPoller:
         self._fx = fx_provider
         self.book: Dict[str, TopOfBook] = {}
         self._running = False
+        self._task: Optional[asyncio.Task] = None
+
+    @property
+    def running(self) -> bool:
+        return self._running
 
     async def start(self) -> None:
+        if self._running: return
         self._running = True
-        asyncio.create_task(self._run())
+        self._task = asyncio.create_task(self._run())
 
     def stop(self) -> None:
         self._running = False
+        if self._task: self._task.cancel()
+        self.book.clear()
 
     async def _run(self) -> None:
-        while self._running:
-            for c in self.coins:
-                if not self._running: break
-                try:
-                    r = await self.client.ticker(f"{c}USDT")
-                    d = (r or {}).get("data", {}) or r or {}
-                    bid = float(d.get("bid") or d.get("best_bid") or d.get("bid_price") or 0)
-                    ask = float(d.get("ask") or d.get("best_ask") or d.get("ask_price") or 0)
-                    if bid <= 0 or ask <= 0: continue
-                    fx = float(self._fx() or 0) or 1.0
-                    self.book[c] = TopOfBook(
-                        coin=c, bid=bid*fx, ask=ask*fx,
-                        ts_ms=int(time.time()*1000),
-                    )
-                except Exception as e:
-                    logger.debug(f"CoinSwitch ticker poll {c} failed: {e}")
-                await asyncio.sleep(0.5)
+        try:
+            while self._running:
+                for c in self.coins:
+                    if not self._running: break
+                    try:
+                        r = await self.client.ticker(f"{c}USDT")
+                        d = (r or {}).get("data", {}) or r or {}
+                        bid = float(d.get("bid") or d.get("best_bid") or d.get("bid_price") or 0)
+                        ask = float(d.get("ask") or d.get("best_ask") or d.get("ask_price") or 0)
+                        if bid <= 0 or ask <= 0: continue
+                        fx = float(self._fx() or 0) or 1.0
+                        self.book[c] = TopOfBook(
+                            coin=c, bid=bid*fx, ask=ask*fx,
+                            ts_ms=int(time.time()*1000),
+                        )
+                    except Exception as e:
+                        logger.debug(f"CoinSwitch ticker poll {c} failed: {e}")
+                    await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            pass
 
 
 class TelegramReporter:
@@ -407,11 +583,14 @@ class BotEngine:
         self.fx = FXRateService(cfg.fx_usdt_inr)
         self.simulator = MarketSimulator(cfg.coins, fx_provider=lambda: self.fx.rate, fx_ref=cfg.fx_usdt_inr) if cfg.simulate else None
         self.live_feed = None if cfg.simulate else LiveBinanceFeed(cfg.coins)
+        # Public CoinSwitch book WS — no keys needed, powers PAPER + LIVE when not simulating
+        self.coinswitch_feed: Optional[LiveCoinSwitchBookFeed] = None if cfg.simulate else \
+            LiveCoinSwitchBookFeed(cfg.coins, lambda: self.fx.rate, url=cfg.coinswitch_ws_url)
         self.telegram = TelegramReporter(cfg.telegram_bot_token, cfg.telegram_chat_id)
         # CoinSwitch REST client — only built when we have both keys AND we're
         # about to trade for real (paper mode still uses simulated fills).
         self.coinswitch: Optional[CoinSwitchFuturesClient] = None
-        self.coinswitch_poller: Optional[LiveCoinSwitchTickerPoller] = None
+        self.coinswitch_poller: Optional[LiveCoinSwitchTickerPoller] = None  # REST fallback when WS stale
         if cfg.coinswitch_api_key and cfg.coinswitch_api_secret:
             try:
                 self.coinswitch = CoinSwitchFuturesClient(
@@ -439,6 +618,7 @@ class BotEngine:
         # sparklines: last 60 spread% points per coin
         self._sparkline: Dict[str, List[float]] = {c: [] for c in cfg.coins}
         self._live_missing_keys_warned = False
+        self._stale_no_keys_warned = False
 
     # --- lifecycle -----------------------------------------------------------
     async def start(self) -> None:
@@ -447,8 +627,7 @@ class BotEngine:
         self.started_at = time.time()
         if self.simulator: await self.simulator.start()
         if self.live_feed: await self.live_feed.start()
-        if self.coinswitch_poller and not self.cfg.simulate:
-            await self.coinswitch_poller.start()
+        if self.coinswitch_feed: await self.coinswitch_feed.start()
         await self.fx.start()
         self._tasks = [
             asyncio.create_task(self._scan_loop()),
@@ -456,7 +635,10 @@ class BotEngine:
             asyncio.create_task(self._equity_ticker_loop()),
             asyncio.create_task(self._hourly_summary_loop()),
         ]
-        await self.store.log("INFO", f"Bot started in {'PAPER' if self.cfg.paper_trading else 'LIVE'} mode")
+        if self.coinswitch_feed:
+            self._tasks.append(asyncio.create_task(self._feed_watchdog_loop()))
+        feed = "SIMULATOR" if self.simulator else "Binance WS + CoinSwitch book WS"
+        await self.store.log("INFO", f"Bot started in {'PAPER' if self.cfg.paper_trading else 'LIVE'} mode · feed: {feed}")
 
     async def stop(self) -> None:
         if not self.running: return
@@ -465,6 +647,7 @@ class BotEngine:
         self._tasks = []
         if self.simulator: self.simulator.stop()
         if self.live_feed: self.live_feed.stop()
+        if self.coinswitch_feed: self.coinswitch_feed.stop()
         if self.coinswitch_poller: self.coinswitch_poller.stop()
         self.fx.stop()
         await self.store.log("INFO", "Bot stopped")
@@ -475,8 +658,72 @@ class BotEngine:
 
     def _laggard(self, coin: str) -> Optional[TopOfBook]:
         if self.simulator: return self.simulator.laggard(coin)
-        if self.coinswitch_poller: return self.coinswitch_poller.book.get(coin)
+        if self.coinswitch_feed:
+            tob = self.coinswitch_feed.fresh(coin, self.cfg.laggard_stale_after_s)
+            if tob: return tob
+        if self.coinswitch_poller and self.coinswitch_poller.running:
+            return self.coinswitch_poller.book.get(coin)
         return None
+
+    def _feed_stale(self) -> bool:
+        age = self.coinswitch_feed.last_msg_age_s() if self.coinswitch_feed else None
+        if age is None:
+            # never received anything: stale once we've waited past the threshold since start
+            return bool(self.started_at) and (time.time() - self.started_at) > self.cfg.laggard_stale_after_s
+        return age > self.cfg.laggard_stale_after_s
+
+    async def _feed_watchdog_loop(self) -> None:
+        """Flip the REST ticker poller on while the CoinSwitch WS is stale, off when it recovers."""
+        try:
+            while self.running:
+                stale = self._feed_stale()
+                if stale and self.coinswitch and not self.coinswitch_poller.running:
+                    await self.coinswitch_poller.start()
+                    await self.store.log("WARN", "CoinSwitch WS stale >%.0fs — falling back to REST ticker poller" % self.cfg.laggard_stale_after_s)
+                elif stale and not self.coinswitch and not self._stale_no_keys_warned:
+                    await self.store.log("WARN", "CoinSwitch WS stale and no API keys for REST fallback — laggard quotes marked STALE, entries paused")
+                    self._stale_no_keys_warned = True
+                elif not stale:
+                    if self.coinswitch_poller and self.coinswitch_poller.running:
+                        self.coinswitch_poller.stop()
+                        await self.store.log("INFO", "CoinSwitch WS recovered — REST fallback poller stopped")
+                    self._stale_no_keys_warned = False
+                await asyncio.sleep(2)
+        except asyncio.CancelledError: pass
+
+    def laggard_source(self) -> str:
+        if self.simulator: return "SIMULATOR"
+        if self.coinswitch_feed and not self._feed_stale(): return "COINSWITCH_WS"
+        if self.coinswitch_poller and self.coinswitch_poller.running: return "REST_POLLER"
+        return "STALE"
+
+    def feed_health(self) -> Dict[str, Any]:
+        f = self.coinswitch_feed
+        lf = self.live_feed
+        def _r(v, n=1): return None if v is None else round(v, n)
+        return {
+            "source": self.laggard_source(),
+            "simulate": self.cfg.simulate,
+            "stale_after_s": self.cfg.laggard_stale_after_s,
+            "laggard": None if not f else {
+                "connected": f.connected, "subscribed": f.subscribed,
+                "last_msg_age_s": _r(f.last_msg_age_s(), 2),
+                "wire_latency_ms": _r(f.wire_latency_ms, 0),
+                "msgs_per_s": _r(f.msgs_per_s(), 1),
+                "msg_count": f.msg_count, "reconnects": f.reconnects,
+                "last_error": f.last_error,
+                "coins": [{"coin": c, "age_ms": _r(f.coin_age_ms(c), 0),
+                           "stale": f.fresh(c, self.cfg.laggard_stale_after_s) is None} for c in self.cfg.coins],
+            },
+            "leader": None if not lf else {
+                "connected": lf.connected, "last_msg_age_s": _r(lf.last_msg_age_s(), 2),
+                "reconnects": lf.reconnects, "coins_with_quotes": len(lf.book),
+            },
+            "rest_fallback": {
+                "available": self.coinswitch is not None,
+                "active": bool(self.coinswitch_poller and self.coinswitch_poller.running),
+            },
+        }
 
     def hurdle_pct(self) -> float:
         c = self.cfg

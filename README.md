@@ -136,7 +136,8 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
 | `BINANCE_API_KEY` / `_SECRET` | *(empty)* | Required only when disabling `PAPER_TRADING` |
 | `COINSWITCH_API_KEY` / `_SECRET` | *(empty)* | Ed25519 hex-encoded key pair from CoinSwitch PRO. Required when disabling `PAPER_TRADING`. Base URL defaults to `https://coinswitch.co` (override with `COINSWITCH_BASE_URL`) |
 | `LIVE_ORDER_TIMEOUT_S` | `5.0` | Max seconds to poll `get_order_status` before treating a live order as timed out |
-| `COINSWITCH_WS_URL` | *(empty)* | Optional — currently unused; poller uses REST ticker as fallback laggard feed in live mode |
+| `COINSWITCH_WS_URL` | *(empty)* | Optional override of the public CoinSwitch PRO Futures book WS (`wss://ws.coinswitch.co/pro/realtime-rates-socket/futures/exchange_2/?EIO=4&transport=websocket`). No keys needed. |
+| `LAGGARD_STALE_AFTER_S` | `10` | Seconds of WS silence before laggard quotes are marked STALE and the REST ticker poller (keys required) takes over |
 
 ## Going Live (checklist)
 

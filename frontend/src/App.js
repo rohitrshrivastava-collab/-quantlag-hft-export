@@ -41,6 +41,50 @@ function StatCard({ label, value, sub, accent = "cyan", testId, icon }) {
   );
 }
 
+const SOURCE_STYLE = {
+  COINSWITCH_WS: "border-emerald-800 bg-emerald-950/40 text-emerald-300",
+  SIMULATOR: "border-amber-700 bg-amber-950/30 text-amber-300",
+  REST_POLLER: "border-orange-700 bg-orange-950/30 text-orange-300",
+  STALE: "border-rose-800 bg-rose-950/40 text-rose-300",
+};
+
+function FeedHealthStrip({ feed }) {
+  if (!feed) return null;
+  const lg = feed.laggard, ld = feed.leader;
+  const src = feed.source || "STALE";
+  const pill = (testId, label, cls) => (
+    <span data-testid={testId} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border font-mono text-[10px] uppercase tracking-wider ${cls}`}>{label}</span>
+  );
+  return (
+    <section data-testid="laggard-feed-health-strip" className="rounded-lg border border-[#1E2638] bg-[#121721] px-4 py-3 flex flex-wrap items-center gap-3">
+      <div className="flex items-center gap-2 mr-2">
+        <Radio className={`h-3.5 w-3.5 ${src === "COINSWITCH_WS" ? "text-emerald-400 animate-pulse" : "text-slate-500"}`} />
+        <span className="text-xs font-semibold tracking-wide text-slate-300" style={{fontFamily:"Outfit, sans-serif"}}>Laggard Feed</span>
+      </div>
+      {pill("feed-source-badge", `SRC · ${src.replace("_", " ")}`, SOURCE_STYLE[src] || SOURCE_STYLE.STALE)}
+      {lg && pill("feed-ws-connected-badge", lg.subscribed ? "WS SUBSCRIBED" : lg.connected ? "WS CONNECTING" : "WS DOWN",
+        lg.subscribed ? SOURCE_STYLE.COINSWITCH_WS : SOURCE_STYLE.STALE)}
+      {lg && pill("feed-wire-latency-badge", `WIRE · ${lg.wire_latency_ms ?? "—"} ms`, "border-cyan-800 bg-cyan-950/30 text-cyan-300")}
+      {lg && pill("feed-msg-rate-badge", `${lg.msgs_per_s ?? 0} snap/s · ${lg.reconnects} rc`, "border-slate-700 bg-slate-900/40 text-slate-300")}
+      {ld && pill("feed-leader-badge", `BINANCE ${ld.connected ? "WS UP" : "WS DOWN"} · ${ld.coins_with_quotes}/10`,
+        ld.connected ? SOURCE_STYLE.COINSWITCH_WS : SOURCE_STYLE.STALE)}
+      {feed.rest_fallback?.active && pill("feed-rest-fallback-badge", "REST FALLBACK ACTIVE", SOURCE_STYLE.REST_POLLER)}
+      {feed.simulate && pill("feed-simulator-badge", "SIMULATOR · set SIMULATE_MARKET=false for real feeds", SOURCE_STYLE.SIMULATOR)}
+      {lg && (
+        <div data-testid="feed-coin-age-row" className="flex flex-wrap gap-1.5 ml-auto">
+          {lg.coins.map((c) => (
+            <span key={c.coin} data-testid={`feed-coin-age-${c.coin}`} title={`${c.coin} last tick ${c.age_ms ?? "—"} ms ago`}
+              className={`font-mono text-[10px] px-1.5 py-0.5 rounded border ${c.stale ? "border-rose-900 text-rose-400" : "border-[#1E2638] text-slate-400"}`}>
+              {c.coin} {c.age_ms == null ? "—" : c.age_ms >= 1000 ? `${(c.age_ms/1000).toFixed(1)}s` : `${c.age_ms}ms`}
+            </span>
+          ))}
+        </div>
+      )}
+      {lg?.last_error && <div data-testid="feed-last-error" className="w-full text-[10px] font-mono text-rose-400/80 truncate">last error: {lg.last_error}</div>}
+    </section>
+  );
+}
+
 const stateBadge = (state) => {
   const map = {
     WAITING: "bg-slate-800 text-slate-400 border-slate-700",
@@ -62,10 +106,11 @@ function Dashboard() {
   const [saving, setSaving] = useState(false);
   const [cfgDraft, setCfgDraft] = useState(null);
   const [liveCheck, setLiveCheck] = useState(null);
+  const [telemetry, setTelemetry] = useState(null);
 
   const pull = async () => {
     try {
-      const [s, sp, op, cl, lg, eq, cfg] = await Promise.all([
+      const [s, sp, op, cl, lg, eq, cfg, tm] = await Promise.all([
         axios.get(`${API}/status`),
         axios.get(`${API}/spreads`),
         axios.get(`${API}/positions/open`),
@@ -73,6 +118,7 @@ function Dashboard() {
         axios.get(`${API}/logs?limit=40`),
         axios.get(`${API}/equity-curve`),
         axios.get(`${API}/config`),
+        axios.get(`${API}/telemetry`),
       ]);
       setStatus(s.data);
       setSpreads(sp.data.items || []);
@@ -81,6 +127,7 @@ function Dashboard() {
       setLogs(lg.data.items || []);
       setEquity(eq.data.items || []);
       setConfig(cfg.data);
+      setTelemetry(tm.data);
       if (!cfgDraft) setCfgDraft(cfg.data);
     } catch (e) { console.error(e); }
   };
@@ -171,6 +218,8 @@ function Dashboard() {
           <StatCard testId="portfolio-net-pnl-card" label="Net Realized PnL" value={`${(status?.realized_pnl_inr ?? 0) >= 0 ? "+" : ""}${fmtINR(status?.realized_pnl_inr).replace("₹","₹")}`} sub={`W ${status?.wins || 0} / L ${status?.losses || 0} · ${wr.toFixed(1)}% win`} accent={pnlAccent} icon={<TrendingUp className="h-4 w-4 text-emerald-400/60"/>} />
           <StatCard testId="portfolio-execution-latency-card" label="Exec Latency (avg)" value={`${(status?.avg_exec_latency_ms || 0).toFixed(0)} ms`} sub={`Hurdle gate · ${fmtPct(status?.hurdle_pct)}`} accent="amber" icon={<Timer className="h-4 w-4 text-amber-400/60"/>} />
         </section>
+
+        <FeedHealthStrip feed={telemetry?.feed} />
 
         {/* Spread monitor grid */}
         <section>

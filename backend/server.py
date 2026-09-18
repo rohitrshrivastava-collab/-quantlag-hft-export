@@ -181,6 +181,7 @@ async def telemetry():
         "mode": snap["mode"],
         "simulate": ENGINE.cfg.simulate,
         "coinswitch_client_ready": ENGINE.coinswitch is not None,
+        "feed": ENGINE.feed_health(),
     }
 
 
