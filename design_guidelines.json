@@ -1,0 +1,177 @@
+{
+  "project_title": "CoinSwitch PRO vs Binance HFT Lead-Lag Latency Arbitrage Ops Console",
+  "app_type": "dashboard",
+  "design_archetype": "THE PERFORMANCE PRO (Tactical Tactical-Minimalism & High-Density Quant Engine)",
+  "color_palette": {
+    "theme": "dark",
+    "background_base": "#0A0D12",
+    "surface_card": "#121721",
+    "surface_card_border": "#1E2638",
+    "surface_card_hover": "#182030",
+    "text_primary": "#F1F5F9",
+    "text_secondary": "#94A3B8",
+    "text_muted": "#64748B",
+    "accent_primary_cyan": "#00F0FF",
+    "accent_bullish_green": "#10B981",
+    "accent_bearish_red": "#EF4444",
+    "accent_warning_amber": "#F59E0B",
+    "binance_brand_yellow": "#F0B90B",
+    "coinswitch_brand_blue": "#2A64F6",
+    "inr_currency_accent": "#A855F7",
+    "stat_glow_cyan": "rgba(0, 240, 255, 0.12)",
+    "forbidden_colors": ["#1B93A4", "#7351B7"]
+  },
+  "typography": {
+    "headings_font": "Outfit, -apple-system, BlinkMacSystemFont, sans-serif",
+    "data_metrics_font": "JetBrains Mono, SFMono-Regular, Menlo, monospace",
+    "body_font": "Manrope, -apple-system, BlinkMacSystemFont, sans-serif",
+    "forbidden_fonts": ["Space Grotesk"],
+    "scales": {
+      "h1_title": "text-2xl sm:text-3xl font-bold tracking-tight text-slate-100",
+      "h2_section": "text-lg sm:text-xl font-semibold tracking-tight text-slate-200",
+      "metric_hero": "text-3xl sm:text-4xl font-extrabold tracking-tight font-mono text-cyan-400",
+      "metric_large": "text-xl sm:text-2xl font-bold font-mono text-slate-100",
+      "metric_sub": "text-sm font-medium font-mono text-slate-400",
+      "label_overline": "text-xs uppercase font-bold tracking-wider text-slate-400"
+    }
+  },
+  "layout_and_spacing": {
+    "grid_strategy": "MODE B: High Density Quant Dashboard Grid",
+    "container_padding": "p-4 sm:p-6 lg:p-8 space-y-6",
+    "card_padding": "p-4 sm:p-5",
+    "card_radius": "rounded-lg border border-[#1E2638] bg-[#121721]",
+    "section_gap": "gap-4 sm:gap-6",
+    "header_style": "backdrop-blur-xl bg-[#0A0D12]/90 sticky top-0 z-50 border-b border-[#1E2638] px-4 py-3 sm:px-6"
+  },
+  "key_components_breakdown": {
+    "top_navigation_bar": {
+      "elements": [
+        "Brand Logo & App Name (QuantLag HFT Console)",
+        "System Heartbeat Status Badge (WS Live, Ping Binance, Ping CoinSwitch)",
+        "Live USDT/INR Rate Ticker with update indicator",
+        "Paper / Live Toggle Switch with active badge indicator",
+        "Emergency Bot Control Button (START / STOP / FORCE FLUSH)"
+      ],
+      "test_ids": {
+        "nav_container": "top-nav-bar",
+        "mode_toggle": "paper-live-mode-toggle",
+        "bot_start_stop": "bot-start-stop-button",
+        "fx_rate_display": "usdt-inr-fx-rate-badge",
+        "heartbeat_status": "telemetry-ws-heartbeat-status"
+      }
+    },
+    "portfolio_summary_cards": {
+      "description": "4 metrics cards for Total Equity (INR), Free Margin (INR), Active Slots Allocation, and Net Realized PnL",
+      "cards": [
+        "Total Portfolio Equity (INR ₹4,000 base + PnL)",
+        "Free Margin vs Allocated Capital (₹400/slot across 10 coins)",
+        "24h Net Realized PnL (INR & % ROI) with Win/Loss count",
+        "System Execution Health (Avg latency in ms, Order fills count)"
+      ],
+      "test_ids": {
+        "equity_card": "portfolio-equity-card",
+        "margin_card": "portfolio-free-margin-card",
+        "pnl_card": "portfolio-net-pnl-card",
+        "latency_card": "portfolio-execution-latency-card"
+      }
+    },
+    "realtime_spread_monitor": {
+      "description": "Grid of 10 coin slot cards showing live price discovery on Binance (USDT), FX converted CoinSwitch (INR -> USDT equivalent), Net Spread %, hurdle rate threshold, and mini spread sparkline.",
+      "items": [
+        "BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAC, NEAR, LINK",
+        "Signal state: WAITING, HURDLE MET, EXECUTING LONG, EXECUTING SHORT, COOLDOWN",
+        "Mini Recharts sparkline for 30s spread momentum",
+        "Quick Action button to trigger manual trade simulation or pause coin slot"
+      ],
+      "test_ids": {
+        "slot_grid": "realtime-spread-slot-grid",
+        "slot_card_prefix": "spread-slot-card-",
+        "mini_chart_prefix": "spread-sparkline-chart-"
+      }
+    },
+    "open_positions_table": {
+      "description": "Dense high-contrast table of currently open lead-lag positions",
+      "columns": [
+        "Coin Pair",
+        "Direction (LONG/SHORT)",
+        "Leader (Binance) Price",
+        "Entry Laggard Price",
+        "Current Laggard Price",
+        "Target Price / Catch-up Spread",
+        "Unrealized PnL (INR)",
+        "Hold Duration / Timeout Counter",
+        "Actions (Close Position / Adjust SL)"
+      ],
+      "test_ids": {
+        "table": "open-positions-table",
+        "row_prefix": "open-position-row-",
+        "close_btn_prefix": "close-position-btn-"
+      }
+    },
+    "closed_trades_history": {
+      "description": "Paginated table or filterable log of executed lead-lag trades with exact gross spread, slippage, net fees, and duration",
+      "test_ids": {
+        "table": "closed-trades-history-table",
+        "export_btn": "export-trades-csv-btn",
+        "filter_coin_select": "trades-coin-filter-select"
+      }
+    },
+    "equity_and_spread_analytics": {
+      "description": "Dual charts: (1) Portfolio Equity Curve (INR over time) with paper vs live filter, (2) Detailed multi-coin spread overlay chart",
+      "test_ids": {
+        "equity_chart": "portfolio-equity-curve-chart",
+        "spread_overlay_chart": "multi-coin-spread-overlay-chart"
+      }
+    },
+    "hourly_summary_card": {
+      "description": "Quant operational telemetry breakdown showing total trades executed in current hour, win rate %, gross vs net PnL spread, average holding time, and max slippage encountered.",
+      "test_ids": {
+        "hourly_card": "hourly-performance-summary-card"
+      }
+    },
+    "config_controls_panel": {
+      "description": "Slide-over or expandable panel for trading parameters: Net Spread Hurdle Gate %, Entry Fee %, Exit Fee %, Slippage Buffer %, Timeout Guard Window (sec), Volatility Stop Loss multiplier, Slot Allocation (₹400).",
+      "test_ids": {
+        "panel": "bot-config-controls-panel",
+        "hurdle_input": "config-hurdle-gate-input",
+        "fee_input": "config-fee-percentage-input",
+        "timeout_input": "config-timeout-window-input",
+        "save_btn": "config-save-settings-btn"
+      }
+    }
+  },
+  "motion_and_interactions": {
+    "hover_effects": "transition-colors duration-150 hover:bg-[#182030] hover:border-slate-700",
+    "pulse_indicators": "animate-pulse for live WebSocket connection status dot (emerald for connected, crimson for reconnecting)",
+    "flash_effects": "Subtle green/red background flash on price tick updates or trade executions (bg-emerald-950/40 or bg-rose-950/40)",
+    "framer_motion_usage": "Animate position entry/exit in tables and modal popovers. Keep chart animations minimal (<300ms) for high-frequency responsiveness."
+  },
+  "visual_enhancers": {
+    "border_style": "1px solid #1E2638 with subtle inner glow for key metrics",
+    "background_grid": "Subtle dark slate technical grid pattern overlay in hero background",
+    "badges": "Pill shaped, font-mono text-xs px-2.5 py-0.5 rounded-full border with high contrast"
+  },
+  "image_urls": {
+    "crypto_logos": {
+      "binance_badge": "https://images.unsplash.com/photo-1622979135225-d2ba269bc1bd?auto=format&fit=crop&w=120&q=80",
+      "trading_workspace": "https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&w=1200&q=80"
+    }
+  },
+  "instructions_to_main_agent": [
+    "Implement the React frontend in Javascript (.js / .jsx files) inside /app/frontend/src.",
+    "Ensure dark mode is forced by applying 'dark' class to html or root container with dark background #0A0D12.",
+    "Do NOT use Space Grotesk or #1B93A4 anywhere in the application.",
+    "Use JetBrains Mono or monospace font styling for all financial numbers, prices, spread percentages, timestamps, and pnl values.",
+    "Implement all 10 key functionalities specified in the prompt with high functional density and real-time feel.",
+    "Include data-testid attributes on all interactive elements, metrics, buttons, inputs, and tables as specified in key_components_breakdown.",
+    "Utilize lucide-react or @heroicons/react for crisp UI icons.",
+    "Provide full interactive controls: paper/live mode toggle, manual bot start/stop, simulation controls to trigger realistic spread opportunities, position close buttons, and config parameter adjustments.",
+    "Ensure full responsiveness across desktop and laptop viewports with dense, scanable grid layouts."
+  ],
+  "UNIVERSAL GUIDELINES FOR MAIN AGENT": {
+    "no_ai_slop": "Avoid standard empty white cards or generic template centered layouts. Use a high-density tactical dark theme with crisp borders and functional color coding.",
+    "color_discipline": "Red = short/negative PnL/down spread, Green = long/positive PnL/hurdle met, Cyan = system primary/leader signal, Amber = timeout/warning, Blue = laggard status.",
+    "data_testid_rule": "MUST include data-testid on every button, input, toggle, chart container, table row, and key metric display.",
+    "transitions_rule": "NEVER use transition: all globally. Specify transition-colors or transition-transform for buttons and cards."
+  }
+}

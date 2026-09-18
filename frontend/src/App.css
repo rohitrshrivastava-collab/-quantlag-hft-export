@@ -1,0 +1,5 @@
+/* App container reset — dashboard-owned layout */
+.App {
+    min-height: 100vh;
+    background-color: #0A0D12;
+}

@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700;800&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+html, body, #root {
+    background-color: #0A0D12;
+    color: #F1F5F9;
+    margin: 0;
+    padding: 0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+    font-family: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+.font-mono, code, pre, table {
+    font-family: 'JetBrains Mono', SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.font-manrope { font-family: 'Manrope', sans-serif; }
+
+/* Subtle grid pattern in bg */
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background-image:
+        linear-gradient(rgba(30,38,56,0.35) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(30,38,56,0.35) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(ellipse at top, rgba(0,0,0,0.55), transparent 70%);
+    pointer-events: none;
+    z-index: 0;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0A0D12; }
+::-webkit-scrollbar-thumb { background: #1E2638; border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: #2A3550; }
+
+::selection { background: rgba(0,240,255,0.25); color: #F1F5F9; }
+
+@layer base {
+    :root {
+        --background: 220 28% 6%;
+        --foreground: 210 40% 96%;
+        --card: 220 28% 10%;
+        --card-foreground: 210 40% 96%;
+        --border: 220 25% 18%;
+        --input: 220 25% 18%;
+        --ring: 189 100% 50%;
+        --radius: 0.5rem;
+    }
+}
