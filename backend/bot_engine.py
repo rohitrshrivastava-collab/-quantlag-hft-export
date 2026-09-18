@@ -692,6 +692,8 @@ class BotEngine:
         ]
         if self.coinswitch_feed:
             self._tasks.append(asyncio.create_task(self._feed_watchdog_loop()))
+        if self.telegram.enabled:
+            self._tasks.append(asyncio.create_task(self._telegram_resolve_bot()))
         feed = "SIMULATOR" if self.simulator else "Binance WS + CoinSwitch book WS"
         await self.store.log("INFO", f"Bot started in {'PAPER' if self.cfg.paper_trading else 'LIVE'} mode · feed: {feed}")
 
@@ -1053,6 +1055,14 @@ class BotEngine:
                 await asyncio.sleep(3600)
                 await self._send_hourly_summary()
         except asyncio.CancelledError: pass
+
+    async def _telegram_resolve_bot(self) -> None:
+        try:
+            me = await self.telegram.get_me()
+            await self.store.log("INFO", f"Telegram alerts enabled via @{me.get('username', '?')}")
+        except Exception as e:
+            self.telegram.last_error = str(e)
+            await self.store.log("WARN", f"Telegram getMe failed: {e}")
 
     async def _send_hourly_summary(self, raise_on_error: bool = False) -> None:
         wr = (self.win_count / self.trade_count * 100.0) if self.trade_count else 0.0

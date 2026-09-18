@@ -1,0 +1,54 @@
+{
+  "summary": "Iteration 4: tested Telegram alerts (status/test/summary + telemetry.telegram), Equity Curve recharts, Spread heatmap (60-cell bar, near-hurdle hits, peak ratio) + regression. Backend 7/8 pytest passed (test_backend_iter4.py); 1 minor failure: /api/telegram/status returns empty bot_username on the very first call before getMe resolves, but self-heals after first send. Frontend all data-testids render correctly, equity chart shows ₹4,000.00 with recharts SVG, 10 spread cards each with 60 heat cells + near-hurdle-hits + peak-ratio badges, Telegram panel shows CONFIGURED · @Rohittelegram_bot, clicking Send Test delivered '✓ Test alert delivered via @Rohittelegram_bot' and sent_count went 2->3. No console errors. Bot left RUNNING in PAPER mode. Total real Telegram messages sent this run: 3 (POST /telegram/test, POST /telegram/summary, UI test-btn click).",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/telegram/status", "issue": "Returns bot_username='' on the very first request after backend restart (getMe not yet resolved). Populates correctly after first sendMessage or after ~1-2s. Consider proactively calling getMe on startup so /telegram/status is populated from the first poll."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard @ 390px width", "issues": ["Body scrollWidth=431px vs viewport=390px causes ~41px horizontal scroll. 2 of 10 [data-testid^=spread-slot-card-] elements have scrollWidth>clientWidth (likely peak/near-hurdle row wrapping). Content is readable and cards render 2-up, but page shouldn't require horizontal scroll on mobile."]}
+    ]
+  },
+  "passed": [
+    "GET /api/telegram/status shape (enabled=true, chat_id_masked='60…660', bot_username eventually='Rohittelegram_bot', sent_count/fail_count/last_sent_ts/last_error present)",
+    "POST /api/telegram/test -> 200 {ok:true, bot:'Rohittelegram_bot'} and sent_count incremented",
+    "POST /api/telegram/summary -> 200 {ok:true} and sent_count incremented",
+    "GET /api/telemetry.telegram shape matches /api/telegram/status; feed.source still COINSWITCH_WS",
+    "GET /api/spreads: 10 items each with heat (60 floats, abs<5), near_hurdle_hits_60s == count(|v|>=0.8), peak_ratio_60s == round(max|v|,3); existing fields intact",
+    "GET /api/equity-curve grows: count 20 -> >20 after 12s wait",
+    "Regression: /api/status, /api/config, /api/positions/{open,closed}, /api/logs, /api/hourly-summary all 200; POST /api/coinswitch/check returns 400",
+    "Bot still RUNNING in PAPER mode",
+    "Frontend header: WS LIVE, MODE · PAPER, USDT/INR badge visible",
+    "Frontend Laggard Feed strip: feed-source-badge='SRC · COINSWITCH WS'",
+    "Frontend Equity Curve card: [data-testid=equity-curve-chart-card] renders with [data-testid=equity-curve-last-value]='₹4,000.00' and recharts <svg class='recharts-surface'>",
+    "Frontend spread heatmap: 10 spread-slot-card-*, first spread-heat-bar-* has exactly 60 child cells; spread-near-hurdle-hits-* and spread-peak-ratio-* (e.g. '8%') present",
+    "Frontend Telegram panel: [data-testid=telegram-status-badge]='CONFIGURED · @Rohittelegram_bot', click send-test -> '✓ Test alert delivered via @Rohittelegram_bot' within 5s; sent-count-badge 'sent 2 · failed 0' -> 'sent 3 · failed 0'",
+    "Zero console errors / pageerrors during full flow"
+  ],
+  "failed": [
+    "test_telegram_status_shape (only when called before first getMe/send completes: bot_username=''); self-recovers after first send"
+  ],
+  "test_report_links": ["/app/backend/tests/test_backend_iter4.py", "/app/test_reports/pytest/iter4.xml"],
+  "action_items": [
+    "Backend: eagerly call TelegramReporter.get_me() during startup (or on first /telegram/status call, cached) so bot_username is populated in the very first response.",
+    "Frontend (minor): fix mobile horizontal overflow at 390px width — page scrollWidth=431 (>41px overflow), 2 spread cards show internal overflow. Likely peak-ratio/near-hurdle row width or BIN/CSW numeric columns need `min-w-0` / truncation / smaller gap on <sm breakpoint."
+  ],
+  "critical_code_review_comments": [
+    "TelegramReporter.status appears to return bot_username lazily after getMe(); status endpoint should either await getMe once at startup or return a cached username so the very first /telegram/status is complete.",
+    "Spread card layout for mobile viewport (390px) overflows horizontally by ~41px — consider max-w-full / overflow-hidden on the outer container or a stacked layout for numeric columns.",
+    "Equity curve currently flat at ₹4,000 (no trades yet, expected in PAPER-real-feed). No y-axis min/max clamping visible — with tiny variations later the chart may show misleadingly large amplitude; consider dynamic ymin/ymax padding."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter4.py", "/app/test_reports/iteration_4.json"],
+  "success_rate": {"backend": "87.5% (7/8)", "frontend": "100% (all data-testids + integration + 0 console errors)"},
+  "test_credentials": "none required (Telegram token already server-side)",
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Telegram messages sent in iter4 run: 3 total (POST /telegram/test, POST /telegram/summary, UI test-btn click). Keep further real sends minimal — user's phone receives them. Backend suite at /app/backend/tests/test_backend_iter4.py sends 2 real Telegram messages when run, factor that in. Bot left RUNNING in PAPER, SIMULATE_MARKET=false. Equity curve flat at ₹4000 is expected until a paper trade fills.",
+  "rca of the issue": "test_telegram_status_shape failure: on cold-boot the TelegramReporter.status() reads self._bot_username which is only populated after getMe() succeeds (first invoked lazily on first send). Between backend startup and first send, status returns bot_username=''. Reproduction: restart backend, immediately GET /api/telegram/status. Mitigation: schedule get_me() as an asyncio.create_task at engine startup, or await it once inside the /api/telegram/status handler with a short timeout and cache the result."
+}

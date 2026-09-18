@@ -69,11 +69,26 @@ SQLite persistence, paper/live toggle.
 - Preview backend `.env` now runs `SIMULATE_MARKET=false` (real public data).
 - Regression: 9/9 backend + frontend pass (`iteration_3.json`).
 
+### Iteration 4 (2026-06, "Telegram + Equity Curve + Spread Heatmap")
+- `TelegramReporter` now real: getMe on start, sendMessage (HTML), lock +
+  50 ms gap, 429 retry_after handling, sent/fail counters, last_error.
+  User's bot/chat configured in backend/.env (`@Rohittelegram_bot`).
+- Endpoints: `GET /api/telegram/status`, `POST /api/telegram/test`,
+  `POST /api/telegram/summary`; `/api/telemetry.telegram`.
+- Dashboard `TelegramPanel` (status, sent/failed, "Send test alert",
+  "Summary now").
+- `EquityCurveChart` (recharts AreaChart, baseline reference line, 5 s samples
+  from `/api/equity-curve`).
+- Spread heatmap: `_record_heat` keeps 60 one-second buckets per coin of the
+  signed max |spread|/hurdle ratio; `/api/spreads` adds `heat[60]`,
+  `near_hurdle_hits_60s` (|ratio| ≥ 0.8) and `peak_ratio_60s`. Dashboard
+  `HeatBar` + flame hit-count badge + "peak 60s NN% of hurdle".
+- Testing: backend 8/8 after fix (bot_username resolved at start), frontend
+  all pass (`iteration_4.json`).
+
 ## Prioritized backlog
 - P1: Multi-source FX (Binance P2P median) for robustness beyond CoinGecko.
 - P1: Token-bucket rate limiter around REST fan-out.
-- P1: Telegram — verify real dispatch once user supplies token/chat id.
-- P2: Equity curve chart on dashboard (data available at `/api/equity-curve`).
 - P2: CSV export of closed trades, per-coin filter.
 - P2: Per-coin kill switch (pause a slot without stopping the whole bot).
 - P2: Dynamic asset-universe screening (24h volume / liquidity).
