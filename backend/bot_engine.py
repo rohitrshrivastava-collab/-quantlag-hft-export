@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, List, Optional
 import aiohttp
 
 from coinswitch_client import CoinSwitchError, CoinSwitchFuturesClient
+from coindcx_client import CoinDCXError, CoinDCXFuturesClient
 
 logger = logging.getLogger("bot_engine")
 
@@ -74,6 +75,13 @@ class BotConfig:
     live_order_timeout_s: float = 5.0      # max time to wait for fill status
     simulate: bool = True                  # force simulator (no real exchange creds)
     laggard_stale_after_s: float = 10.0    # WS silence before REST fallback / STALE gate
+    leverage: int = 1                      # notional = slot margin × leverage
+    laggard_exchange: str = "coinswitch"   # coinswitch | coindcx
+    coindcx_api_key: str = ""
+    coindcx_api_secret: str = ""
+    basis_filter: bool = True              # subtract rolling median basis from spread
+    basis_window_s: int = 300
+    digest_time_ist: str = "23:30"
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -104,6 +112,13 @@ class BotConfig:
             live_order_timeout_s=_f("LIVE_ORDER_TIMEOUT_S", 5.0),
             simulate=_b("SIMULATE_MARKET", True),
             laggard_stale_after_s=_f("LAGGARD_STALE_AFTER_S", 10.0),
+            leverage=max(1, _i("LEVERAGE", 1)),
+            laggard_exchange=os.environ.get("LAGGARD_EXCHANGE", "coinswitch").strip().lower() or "coinswitch",
+            coindcx_api_key=os.environ.get("COINDCX_API_KEY", ""),
+            coindcx_api_secret=os.environ.get("COINDCX_API_SECRET", ""),
+            basis_filter=_b("BASIS_FILTER", True),
+            basis_window_s=_i("BASIS_WINDOW_S", 300),
+            digest_time_ist=os.environ.get("DIGEST_TIME_IST", "23:30"),
         )
 
 
@@ -146,6 +161,9 @@ class Position:
     entry_order_id: Optional[str] = None
     exit_order_id: Optional[str] = None
     exec_latency_ms: Optional[float] = None
+    leverage: int = 1
+    notional_inr: float = 0.0
+    basis_pct: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +484,70 @@ class LiveCoinSwitchBookFeed:
                 if self._running: self.reconnects += 1
 
 
+class LiveCoinDCXBookFeed(LiveCoinSwitchBookFeed):
+    """CoinDCX Futures public book stream (Socket.IO v2 / EIO=3): depth-snapshot + depth-update deltas."""
+    DEFAULT_URL = "wss://stream.coindcx.com/socket.io/?EIO=3&transport=websocket"
+
+    def __init__(self, coins: List[str], fx_provider, url: str = "") -> None:
+        super().__init__(coins, fx_provider, url or self.DEFAULT_URL)
+        self._books: Dict[str, Dict[str, Dict[float, float]]] = {}
+
+    def _apply(self, coin: str, side: str, levels: Dict[str, str], snapshot: bool) -> None:
+        book = self._books.setdefault(coin, {"bids": {}, "asks": {}})
+        if snapshot: book[side] = {}
+        for p, q in levels.items():
+            fp, fq = float(p), float(q)
+            if fq <= 0: book[side].pop(fp, None)
+            else: book[side][fp] = fq
+
+    async def _run(self) -> None:
+        backoff = 1
+        while self._running:
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.ws_connect(self.url, heartbeat=None) as ws:
+                        self.connected = True; self.connected_since = time.time(); self.last_error = ""
+                        last_ping = time.time()
+                        while self._running:
+                            if time.time() - last_ping > 20:
+                                await ws.send_str("2"); last_ping = time.time()
+                            msg = await ws.receive(timeout=30)
+                            if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
+                                raise ConnectionError(f"ws closed ({msg.type.name})")
+                            if msg.type != aiohttp.WSMsgType.TEXT: continue
+                            self.last_msg_ts = time.time()
+                            data: str = msg.data
+                            if data == "40":
+                                for c in self.coins:
+                                    await ws.send_str("42" + json.dumps(["join", {"channelName": f"B-{c}_USDT@orderbook@20-futures"}]))
+                                self.subscribed = True; backoff = 1
+                                logger.info(f"CoinDCX WS joined {len(self.coins)} books")
+                            elif data.startswith("42"):
+                                evt = json.loads(data[2:]); name = evt[0]
+                                if name not in ("depth-update", "depth-snapshot"): continue
+                                payload = evt[1].get("data") if isinstance(evt[1], dict) else None
+                                d = json.loads(payload) if isinstance(payload, str) else (payload or {})
+                                coin = str(d.get("s", "")).replace("B-", "").replace("_USDT", "").replace("USDT", "")
+                                if coin not in self.coins: continue
+                                snap = name == "depth-snapshot"
+                                self._apply(coin, "bids", d.get("bids", {}), snap)
+                                self._apply(coin, "asks", d.get("asks", {}), snap)
+                                b = self._books[coin]
+                                if not b["bids"] or not b["asks"]: continue
+                                self.msg_count += 1; self._rate_window.append(self.last_msg_ts)
+                                self._on_snapshot({"s": f"{coin}USDT", "timestamp": d.get("ts"),
+                                                   "bids": [[max(b["bids"]), 0]], "asks": [[min(b["asks"]), 0]]})
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.last_error = str(e) or e.__class__.__name__
+                logger.warning(f"CoinDCX WS error: {self.last_error}; reconnecting in {backoff}s")
+                await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
+            finally:
+                self.connected = False; self.subscribed = False
+                if self._running: self.reconnects += 1
+
+
 class FXRateService:
     """Maintains a real-time USDT/INR quote (Binance P2P median as source).
     Falls back to config value if REST fails.
@@ -636,10 +718,18 @@ class BotEngine:
         self.fx = FXRateService(cfg.fx_usdt_inr)
         self.simulator = MarketSimulator(cfg.coins, fx_provider=lambda: self.fx.rate, fx_ref=cfg.fx_usdt_inr) if cfg.simulate else None
         self.live_feed = None if cfg.simulate else LiveBinanceFeed(cfg.coins)
-        # Public CoinSwitch book WS — no keys needed, powers PAPER + LIVE when not simulating
+        # Public laggard book WS — no keys needed, powers PAPER + LIVE when not simulating
+        FeedCls = LiveCoinDCXBookFeed if cfg.laggard_exchange == "coindcx" else LiveCoinSwitchBookFeed
         self.coinswitch_feed: Optional[LiveCoinSwitchBookFeed] = None if cfg.simulate else \
-            LiveCoinSwitchBookFeed(cfg.coins, lambda: self.fx.rate, url=cfg.coinswitch_ws_url)
+            FeedCls(cfg.coins, lambda: self.fx.rate, url=cfg.coinswitch_ws_url if cfg.laggard_exchange == "coinswitch" else "")
         self.telegram = TelegramReporter(cfg.telegram_bot_token, cfg.telegram_chat_id)
+        self.coindcx: Optional[CoinDCXFuturesClient] = None
+        if cfg.coindcx_api_key and cfg.coindcx_api_secret:
+            try:
+                self.coindcx = CoinDCXFuturesClient(cfg.coindcx_api_key, cfg.coindcx_api_secret)
+            except Exception as e:
+                logger.warning(f"CoinDCX client init failed: {e}")
+        self._basis_samples: Dict[str, List[tuple]] = {c: [] for c in cfg.coins}
         # CoinSwitch REST client — only built when we have both keys AND we're
         # about to trade for real (paper mode still uses simulated fills).
         self.coinswitch: Optional[CoinSwitchFuturesClient] = None
@@ -668,6 +758,8 @@ class BotEngine:
         self._last_hourly_ts = time.time()
         self._last_signal_state: Dict[str, str] = {c: "WAITING" for c in cfg.coins}
         self._last_spread_pct: Dict[str, float] = {c: 0.0 for c in cfg.coins}
+        self._last_gross_pct: Dict[str, float] = {c: 0.0 for c in cfg.coins}
+        self._last_basis_pct: Dict[str, float] = {c: 0.0 for c in cfg.coins}
         # sparklines: last 60 spread% points per coin
         self._sparkline: Dict[str, List[float]] = {c: [] for c in cfg.coins}
         # heatmap: coin -> {epoch_sec: signed max-|spread|% in that second} (kept HEAT_RETENTION_S)
@@ -695,7 +787,8 @@ class BotEngine:
             self._tasks.append(asyncio.create_task(self._feed_watchdog_loop()))
         if self.telegram.enabled:
             self._tasks.append(asyncio.create_task(self._telegram_resolve_bot()))
-        feed = "SIMULATOR" if self.simulator else "Binance WS + CoinSwitch book WS"
+            self._tasks.append(asyncio.create_task(self._daily_digest_loop()))
+        feed = "SIMULATOR" if self.simulator else f"Binance WS + {self.cfg.laggard_exchange.upper()} book WS"
         await self.store.log("INFO", f"Bot started in {'PAPER' if self.cfg.paper_trading else 'LIVE'} mode · feed: {feed}")
 
     async def stop(self) -> None:
@@ -751,7 +844,7 @@ class BotEngine:
 
     def laggard_source(self) -> str:
         if self.simulator: return "SIMULATOR"
-        if self.coinswitch_feed and not self._feed_stale(): return "COINSWITCH_WS"
+        if self.coinswitch_feed and not self._feed_stale(): return f"{self.cfg.laggard_exchange.upper()}_WS"
         if self.coinswitch_poller and self.coinswitch_poller.running: return "REST_POLLER"
         return "STALE"
 
@@ -761,6 +854,7 @@ class BotEngine:
         def _r(v, n=1): return None if v is None else round(v, n)
         return {
             "source": self.laggard_source(),
+            "laggard_exchange": self.cfg.laggard_exchange,
             "simulate": self.cfg.simulate,
             "stale_after_s": self.cfg.laggard_stale_after_s,
             "laggard": None if not f else {
@@ -858,10 +952,14 @@ class BotEngine:
         leader_inr_mid = leader.mid * fx
         # gross divergence % vs laggard mid
         gross_pct = (leader_inr_mid - lagg.mid) / lagg.mid * 100.0
-        self._last_spread_pct[coin] = gross_pct
-        sp = self._sparkline[coin]; sp.append(gross_pct)
+        basis = self._update_basis(coin, gross_pct)
+        adj_pct = gross_pct - basis if self.cfg.basis_filter else gross_pct
+        self._last_gross_pct[coin] = gross_pct
+        self._last_basis_pct[coin] = basis
+        self._last_spread_pct[coin] = adj_pct
+        sp = self._sparkline[coin]; sp.append(adj_pct)
         if len(sp) > 60: self._sparkline[coin] = sp[-60:]
-        self._record_heat(coin, gross_pct)
+        self._record_heat(coin, adj_pct)
 
         # skip if slot already occupied
         if await self.store.get_open(coin):
@@ -872,25 +970,93 @@ class BotEngine:
             return
 
         hurdle = self.hurdle_pct()
-        if gross_pct > hurdle:
+        # basis-adjusted catch-up target: leader price net of the persistent offset
+        target_ref = leader_inr_mid / (1 + basis / 100.0) if self.cfg.basis_filter else leader_inr_mid
+        if adj_pct > hurdle:
             self._last_signal_state[coin] = "HURDLE_MET_LONG"
-            await self._open_position(coin, "LONG", leader, lagg, leader_inr_mid)
-        elif -gross_pct > hurdle:
+            await self._open_position(coin, "LONG", leader, lagg, target_ref, basis)
+        elif -adj_pct > hurdle:
             self._last_signal_state[coin] = "HURDLE_MET_SHORT"
-            await self._open_position(coin, "SHORT", leader, lagg, leader_inr_mid)
+            await self._open_position(coin, "SHORT", leader, lagg, target_ref, basis)
         else:
             self._last_signal_state[coin] = "WAITING"
+
+    # --- basis filter ----------------------------------------------------------
+    def _update_basis(self, coin: str, gross_pct: float) -> float:
+        now = time.time()
+        s = self._basis_samples[coin]
+        s.append((now, gross_pct))
+        cutoff = now - self.cfg.basis_window_s
+        if s and s[0][0] < cutoff:
+            self._basis_samples[coin] = s = [x for x in s if x[0] >= cutoff]
+        if len(s) < 20: return 0.0        # not enough history → no adjustment
+        vals = sorted(v for _, v in s)
+        return vals[len(vals) // 2]
+
+    # --- account controls ------------------------------------------------------
+    async def reset_account(self, equity_inr: float) -> None:
+        self.cfg.starting_capital_inr = equity_inr
+        self.equity_inr = equity_inr
+        self.realized_pnl_inr = 0.0
+        self.trade_count = self.win_count = self.loss_count = 0
+        self.total_hold_sec = self.total_exec_latency_ms = 0.0
+        if hasattr(self.store, "equity_curve"): self.store.equity_curve = []
+        await self.store.push_equity(time.time(), equity_inr)
+        await self.store.log("INFO", f"Account reset: equity ₹{equity_inr:.2f}, stats zeroed (closed history kept)")
+
+    async def apply_leverage(self, leverage: int) -> List[str]:
+        """Set leverage; in LIVE mode push to the laggard exchange for coins without open positions."""
+        self.cfg.leverage = leverage
+        errors: List[str] = []
+        if self.cfg.paper_trading: return errors
+        open_coins = {p.coin for p in await self.store.all_open()}
+        for c in self.cfg.coins:
+            if c in open_coins: continue
+            try:
+                if self.cfg.laggard_exchange == "coindcx" and self.coindcx:
+                    await self.coindcx.update_leverage(c, leverage)
+                elif self.coinswitch:
+                    await self.coinswitch.update_leverage(f"{c}USDT", leverage)
+            except Exception as e:
+                errors.append(f"{c}: {e}")
+        if errors: await self.store.log("WARN", f"Leverage update failed for {len(errors)} symbols: {errors[:3]}")
+        else: await self.store.log("INFO", f"Leverage set to {leverage}x")
+        return errors
+
+    def coin_analytics(self) -> List[Dict[str, Any]]:
+        out = []
+        closed = getattr(self.store, "closed", [])
+        for c in self.cfg.coins:
+            ps = [p for p in closed if p.coin == c]
+            n = len(ps); wins = sum(1 for p in ps if p.net_pnl_inr >= 0)
+            out.append({
+                "coin": c, "trades": n, "wins": wins, "losses": n - wins,
+                "win_rate": round(wins / n * 100, 1) if n else 0.0,
+                "net_pnl_inr": round(sum(p.net_pnl_inr for p in ps), 2),
+                "gross_pnl_inr": round(sum(p.gross_pnl_inr for p in ps), 2),
+                "fees_inr": round(sum(p.fees_inr for p in ps), 2),
+                "avg_hold_sec": round(sum((p.closed_at or 0) - p.opened_at for p in ps) / n, 1) if n else 0.0,
+                "timeouts": sum(1 for p in ps if p.close_reason == "TIMEOUT"),
+                "target_hits": sum(1 for p in ps if p.close_reason == "TARGET_HIT"),
+                "stops": sum(1 for p in ps if p.close_reason == "STOP_LOSS"),
+                "last_trade_ts": max((p.closed_at or 0) for p in ps) if ps else None,
+                "paused": c in self.paused,
+                "basis_pct": round(self._last_basis_pct.get(c, 0.0), 4),
+            })
+        return out
 
     # --- order lifecycle -----------------------------------------------------
     async def _open_position(self, coin: str, direction: str,
                              leader: TopOfBook, lagg: TopOfBook,
-                             leader_inr_mid: float) -> None:
+                             leader_inr_mid: float, basis: float = 0.0) -> None:
         signal_ts = time.time()
-        size_inr = min(self.allocated_per_slot_inr(), self.equity_inr * 0.15)
+        size_inr = min(self.allocated_per_slot_inr(), max(0.0, self.equity_inr - sum(p.size_inr for p in await self.store.all_open())))
         if size_inr < 50: return  # min lot guard
+        lev = max(1, int(self.cfg.leverage))
+        notional_inr = size_inr * lev
         # Entry price (paper) = worst top-of-book (taker)
         entry_price = lagg.ask if direction == "LONG" else lagg.bid
-        contracts = size_inr / entry_price
+        contracts = notional_inr / entry_price
         target = leader_inr_mid
         stop = entry_price * (1 - self.cfg.stop_loss_pct/100.0) if direction == "LONG" \
                else entry_price * (1 + self.cfg.stop_loss_pct/100.0)
@@ -902,43 +1068,28 @@ class BotEngine:
             latency_ms = random.uniform(80, 220)
             await asyncio.sleep(latency_ms/1000.0)
         else:
-            # -------- LIVE: place MARKET order on CoinSwitch PRO Futures --------
-            if not self.coinswitch:
+            # -------- LIVE: place MARKET order on the laggard exchange --------
+            if not self._live_executor_ready():
                 if not self._live_missing_keys_warned:
-                    await self.store.log("ERROR", "[LIVE] CoinSwitch keys missing — no orders will be placed until COINSWITCH_API_KEY/SECRET are set. Suppressing further per-coin warnings.")
+                    await self.store.log("ERROR", f"[LIVE] {self.cfg.laggard_exchange.upper()} keys missing — no orders will be placed until API key/secret are set. Suppressing further per-coin warnings.")
                     self._live_missing_keys_warned = True
                 return
             fx = max(self.fx.rate, 1e-6)
-            # base-asset quantity (e.g. BTC units). Use Binance USDT price as ref
-            # since it's the freshest; CoinSwitch fill will get its own avg price.
-            usdt_size = size_inr / fx
-            qty = usdt_size / max(leader.mid, 1e-9)
-            symbol = f"{coin}USDT"
+            usdt_notional = notional_inr / fx
+            qty = usdt_notional / max(leader.mid, 1e-9)
             side = "BUY" if direction == "LONG" else "SELL"
             t0 = time.perf_counter()
             try:
-                placed = await self.coinswitch.place_order(
-                    symbol=symbol, side=side, order_type="MARKET",
-                    quantity=qty, reduce_only=False,
-                )
-                entry_order_id = (placed.get("data") or {}).get("order_id")
-                if not entry_order_id:
-                    await self.store.log("ERROR", f"[LIVE] {coin} place_order missing order_id: {placed}")
-                    return
-                filled = await self.coinswitch.wait_for_fill(
-                    entry_order_id, timeout_s=self.cfg.live_order_timeout_s)
-            except CoinSwitchError as e:
+                fill = await self._live_market(coin, side, qty, reduce_only=False)
+            except (CoinSwitchError, CoinDCXError) as e:
                 await self.store.log("ERROR", f"[LIVE] {coin} order rejected {e.status}: {e.body}")
                 return
             except Exception as e:
                 await self.store.log("ERROR", f"[LIVE] {coin} order exception: {e}")
                 return
             latency_ms = (time.perf_counter() - t0) * 1000.0
-            d = (filled.get("data") or {})
-            exec_qty = float(d.get("exec_quantity") or 0)
-            avg_px = float(d.get("avg_execution_price") or 0)
-            fee_usdt = float(d.get("execution_fee") or 0)
-            status = d.get("status", "")
+            entry_order_id = fill["order_id"]
+            exec_qty, avg_px, fee_usdt, status = fill["exec_qty"], fill["avg_px"], fill["fee"], fill["status"]
             if exec_qty <= 0 or avg_px <= 0:
                 await self.store.log(
                     "WARN", f"[LIVE] {coin} order {status} exec_qty=0 order_id={entry_order_id}")
@@ -946,7 +1097,8 @@ class BotEngine:
             # translate to engine's INR bookkeeping using current FX
             contracts = exec_qty                          # base-asset units
             entry_price = avg_px * fx                     # INR-equivalent entry
-            size_inr = exec_qty * avg_px * fx             # actual filled INR notional
+            notional_inr = exec_qty * avg_px * fx         # actual filled INR notional
+            size_inr = notional_inr / lev                 # margin actually committed
             entry_fee_inr = fee_usdt * fx
             target = leader_inr_mid
             stop = entry_price * (1 - self.cfg.stop_loss_pct/100.0) if direction == "LONG" \
@@ -969,15 +1121,42 @@ class BotEngine:
             exec_latency_ms=latency_ms,
             entry_order_id=entry_order_id,
             fees_inr=entry_fee_inr,
+            leverage=lev,
+            notional_inr=notional_inr,
+            basis_pct=basis,
         )
         await self.store.add_open(pos)
-        await self.store.log("TRADE", f"OPEN {direction} {coin} ₹{size_inr:.2f} @ {entry_price:.6f}")
+        await self.store.log("TRADE", f"OPEN {direction} {coin} ₹{size_inr:.2f}×{lev} @ {entry_price:.6f}")
         await self.telegram.send(
             f"🟢 <b>OPEN {direction}</b> {coin}\n"
-            f"Size: ₹{size_inr:.2f} ({contracts:.6f} contracts)\n"
+            f"Margin: ₹{size_inr:.2f} × {lev}x = ₹{notional_inr:.2f} ({contracts:.6f} contracts)\n"
             f"Entry: {entry_price:.6f} | Target: {target:.6f}\n"
             f"Mode: {pos.mode}"
         )
+
+    # --- live execution (exchange-agnostic) --------------------------------------
+    def _live_executor_ready(self) -> bool:
+        return bool(self.coindcx if self.cfg.laggard_exchange == "coindcx" else self.coinswitch)
+
+    async def _live_market(self, coin: str, side: str, qty: float, reduce_only: bool) -> Dict[str, Any]:
+        """Place a MARKET order on the configured laggard and wait for the fill.
+        Returns {order_id, exec_qty, avg_px (USDT), fee (USDT), status}."""
+        if self.cfg.laggard_exchange == "coindcx":
+            placed = await self.coindcx.market_order(coin, side, qty, self.cfg.leverage)
+            oid = str(placed.get("id") or "")
+            if not oid: raise RuntimeError(f"CoinDCX create missing id: {placed}")
+            o = await self.coindcx.wait_for_fill(oid, side, timeout_s=self.cfg.live_order_timeout_s) or placed
+            total = float(o.get("total_quantity") or 0); rem = float(o.get("remaining_quantity") or 0)
+            return {"order_id": oid, "exec_qty": max(0.0, total - rem), "avg_px": float(o.get("avg_price") or 0),
+                    "fee": float(o.get("fee_amount") or 0), "status": str(o.get("status", ""))}
+        placed = await self.coinswitch.place_order(symbol=f"{coin}USDT", side=side, order_type="MARKET",
+                                                   quantity=qty, reduce_only=reduce_only)
+        oid = (placed.get("data") or {}).get("order_id")
+        if not oid: raise RuntimeError(f"CoinSwitch place_order missing order_id: {placed}")
+        d = (await self.coinswitch.wait_for_fill(oid, timeout_s=self.cfg.live_order_timeout_s)).get("data") or {}
+        return {"order_id": oid, "exec_qty": float(d.get("exec_quantity") or 0),
+                "avg_px": float(d.get("avg_execution_price") or 0), "fee": float(d.get("execution_fee") or 0),
+                "status": d.get("status", "")}
 
     async def _position_manager_loop(self) -> None:
         try:
@@ -1006,38 +1185,29 @@ class BotEngine:
     async def _close_position(self, pos: Position, price: float, reason: str) -> None:
         exit_fee_inr: Optional[float] = None
         exit_order_id: Optional[str] = None
-        if pos.mode == "LIVE" and self.coinswitch:
+        if pos.mode == "LIVE" and self._live_executor_ready():
             # place reduce_only MARKET on opposite side
-            symbol = f"{pos.coin}USDT"
             side = "SELL" if pos.direction == "LONG" else "BUY"
             try:
-                placed = await self.coinswitch.place_order(
-                    symbol=symbol, side=side, order_type="MARKET",
-                    quantity=pos.contracts, reduce_only=True,
-                )
-                exit_order_id = (placed.get("data") or {}).get("order_id")
-                if exit_order_id:
-                    filled = await self.coinswitch.wait_for_fill(
-                        exit_order_id, timeout_s=self.cfg.live_order_timeout_s)
-                    d = (filled.get("data") or {})
-                    exec_qty = float(d.get("exec_quantity") or 0)
-                    avg_px = float(d.get("avg_execution_price") or 0)
-                    fee_usdt = float(d.get("execution_fee") or 0)
-                    if exec_qty > 0 and avg_px > 0:
-                        fx = max(self.fx.rate, 1e-6)
-                        price = avg_px * fx
-                        exit_fee_inr = fee_usdt * fx
-                        # partial-fill: shrink contracts to what actually closed
-                        if exec_qty < pos.contracts:
-                            pos.contracts = exec_qty
-                    await self.store.log(
-                        "INFO",
-                        f"[LIVE] {pos.coin} CLOSE fill exec={exec_qty} avg={avg_px} fee={fee_usdt} USDT")
-            except CoinSwitchError as e:
+                fill = await self._live_market(pos.coin, side, pos.contracts, reduce_only=True)
+                exit_order_id = fill["order_id"]
+                exec_qty, avg_px, fee_usdt = fill["exec_qty"], fill["avg_px"], fill["fee"]
+                if exec_qty > 0 and avg_px > 0:
+                    fx = max(self.fx.rate, 1e-6)
+                    price = avg_px * fx
+                    exit_fee_inr = fee_usdt * fx
+                    # partial-fill: shrink contracts to what actually closed
+                    if exec_qty < pos.contracts:
+                        pos.contracts = exec_qty
+                await self.store.log(
+                    "INFO",
+                    f"[LIVE] {pos.coin} CLOSE fill exec={exec_qty} avg={avg_px} fee={fee_usdt} USDT")
+            except (CoinSwitchError, CoinDCXError) as e:
                 await self.store.log("ERROR", f"[LIVE] {pos.coin} close rejected {e.status}: {e.body}")
             except Exception as e:
                 await self.store.log("ERROR", f"[LIVE] {pos.coin} close exception: {e}")
 
+        notional = pos.notional_inr or pos.size_inr * max(1, pos.leverage)
         pos.exit_price_inr = price
         pos.closed_at = time.time()
         pos.close_reason = reason
@@ -1049,9 +1219,9 @@ class BotEngine:
         if pos.mode == "LIVE":
             entry_fee = pos.fees_inr or 0.0  # captured at open
             fees = entry_fee + (exit_fee_inr if exit_fee_inr is not None
-                                else pos.size_inr * self.cfg.exit_taker_fee_pct/100.0)
+                                else notional * self.cfg.exit_taker_fee_pct/100.0)
         else:
-            fees = pos.size_inr * (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct) / 100.0
+            fees = notional * (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct) / 100.0
         pos.gross_pnl_inr = gross
         pos.fees_inr = fees
         pos.net_pnl_inr = gross - fees
@@ -1099,6 +1269,41 @@ class BotEngine:
             self.telegram.last_error = str(e)
             await self.store.log("WARN", f"Telegram getMe failed: {e}")
 
+    async def _daily_digest_loop(self) -> None:
+        try:
+            while self.running:
+                hh, mm = (int(x) for x in (self.cfg.digest_time_ist.split(":") + ["0"])[:2])
+                ist = timezone(timedelta(hours=5, minutes=30))
+                now = datetime.now(ist)
+                nxt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if nxt <= now: nxt += timedelta(days=1)
+                await asyncio.sleep((nxt - now).total_seconds())
+                await self.send_daily_digest()
+        except asyncio.CancelledError: pass
+
+    async def send_daily_digest(self, raise_on_error: bool = False, bench: Optional[Dict[str, Any]] = None) -> None:
+        rows = sorted(self.coin_analytics(), key=lambda r: r["net_pnl_inr"], reverse=True)
+        traded = [r for r in rows if r["trades"]]
+        wr = (self.win_count / self.trade_count * 100.0) if self.trade_count else 0.0
+        lines = [f"📒 <b>Daily Digest</b> · {datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%d %b %Y %H:%M IST')}",
+                 f"Equity ₹{self.equity_inr:.2f} (start ₹{self.cfg.starting_capital_inr:.0f}) · PnL ₹{self.realized_pnl_inr:+.2f}",
+                 f"Trades {self.trade_count} · Win {wr:.1f}% · Lev {self.cfg.leverage}x · Slots {self.cfg.num_slots} · {self.cfg.laggard_exchange.upper()}"]
+        if traded:
+            lines.append(f"🏆 Best: {traded[0]['coin']} ₹{traded[0]['net_pnl_inr']:+.2f} ({traded[0]['trades']} tr)")
+            lines.append(f"🩸 Worst: {traded[-1]['coin']} ₹{traded[-1]['net_pnl_inr']:+.2f} ({traded[-1]['trades']} tr)")
+            lines.append("<pre>coin  tr  win%   net₹   T/O</pre>")
+            lines.append("<pre>" + "\n".join(f"{r['coin']:<5}{r['trades']:>3}{r['win_rate']:>6.0f}{r['net_pnl_inr']:>8.2f}{r['timeouts']:>5}" for r in traded) + "</pre>")
+        fh = self.feed_health()
+        lg = fh.get("laggard") or {}
+        lines.append(f"📡 Feed {fh['source']} · wire {lg.get('wire_latency_ms') or '—'} ms · rc {lg.get('reconnects', 0)}")
+        if bench and bench.get("exchanges"):
+            ex = bench["exchanges"].get(self.cfg.laggard_exchange) or {}
+            t = ex.get("ws_tick_to_receipt_ms") or {}
+            lines.append(f"⏱ Last benchmark {self.cfg.laggard_exchange}: tick p50 {t.get('p50')} / p99 {t.get('p99')} ms · TCP p50 {(ex.get('tcp_rtt_ms') or {}).get('p50')} ms")
+        paused = sorted(self.paused)
+        if paused: lines.append(f"⏸ Paused: {', '.join(paused)}")
+        await self.telegram.send("\n".join(lines), raise_on_error=raise_on_error)
+
     async def _send_hourly_summary(self, raise_on_error: bool = False) -> None:
         wr = (self.win_count / self.trade_count * 100.0) if self.trade_count else 0.0
         avg_hold = self.total_hold_sec / self.trade_count if self.trade_count else 0.0
@@ -1136,6 +1341,10 @@ class BotEngine:
             "avg_hold_sec": round(avg_hold, 2),
             "avg_exec_latency_ms": round(avg_lat, 1),
             "fx_usdt_inr": round(self.fx.rate, 4),
+            "leverage": self.cfg.leverage,
+            "laggard_exchange": self.cfg.laggard_exchange,
+            "basis_filter": self.cfg.basis_filter,
+            "open_positions": len(self.store.open),
         }
 
     def spreads_snapshot(self) -> List[Dict[str, Any]]:
@@ -1150,6 +1359,8 @@ class BotEngine:
                 "coinswitch_bid": round(lagg.bid, 6) if lagg else None,
                 "coinswitch_ask": round(lagg.ask, 6) if lagg else None,
                 "gross_spread_pct": round(self._last_spread_pct.get(c, 0.0), 4),
+                "raw_spread_pct": round(self._last_gross_pct.get(c, 0.0), 4),
+                "basis_pct": round(self._last_basis_pct.get(c, 0.0), 4),
                 "signal_state": self._last_signal_state.get(c, "WAITING"),
                 "in_trade": c in self.store.open,
                 "paused": c in self.paused,

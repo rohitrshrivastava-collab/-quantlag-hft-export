@@ -167,6 +167,85 @@ function HurdleTuner({ draftHurdle, sim }) {
 
 const EX_ORDER = ["binance", "coinswitch", "coindcx"];
 
+function AccountPanel({ status, onApply, result }) {
+  const [draft, setDraft] = useState({ equity_inr: "", num_slots: "", leverage: "" });
+  useEffect(() => {
+    if (status && draft.num_slots === "" && draft.leverage === "") {
+      setDraft({ equity_inr: String(status.starting_capital_inr ?? ""), num_slots: String(status.num_slots ?? ""), leverage: String(status.leverage ?? 1) });
+    }
+    // eslint-disable-next-line
+  }, [status?.num_slots, status?.leverage, status?.starting_capital_inr]);
+  const field = (k, label, tid, step = "1", hint) => (
+    <label className="block">
+      <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">{label}</span>
+      <input data-testid={tid} type="number" step={step} min="1" value={draft[k]} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}
+        className="mt-1 w-full bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-xs focus:outline-none focus:border-cyan-600 focus:ring-1 focus:ring-cyan-800" />
+      {hint && <span className="text-[10px] text-slate-600 font-mono">{hint}</span>}
+    </label>
+  );
+  const equityChanged = Number(draft.equity_inr) !== Number(status?.starting_capital_inr);
+  const notional = (Number(status?.allocated_per_slot_inr) || 0) * (Number(draft.leverage) || 1);
+  return (
+    <div data-testid="account-controls-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
+      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
+        <h3 className="font-semibold text-slate-200 inline-flex items-center gap-2" style={{fontFamily:"Outfit, sans-serif"}}><Wallet className="h-4 w-4 text-cyan-400"/> Account Controls</h3>
+        <span data-testid="account-exposure-badge" className="px-2 py-0.5 rounded-full border border-purple-800 bg-purple-950/30 text-purple-300 font-mono text-[10px]">
+          {fmtINR(status?.allocated_per_slot_inr)} margin × {draft.leverage || 1}x = {fmtINR(notional)} / slot
+        </span>
+      </div>
+      <div className="grid grid-cols-3 gap-3 text-xs">
+        {field("equity_inr", "Total Equity ₹", "account-equity-input", "100", equityChanged ? "resets PnL & stats" : "current baseline")}
+        {field("num_slots", "Open Positions (slots)", "account-slots-input", "1", `${status?.open_positions ?? 0} open now`)}
+        {field("leverage", "Leverage ×", "account-leverage-input", "1", status?.mode === "LIVE" ? "pushed to exchange" : "paper: scales notional")}
+      </div>
+      <button data-testid="account-apply-btn" onClick={() => onApply({
+        ...(equityChanged && draft.equity_inr ? { equity_inr: Number(draft.equity_inr) } : {}),
+        ...(draft.num_slots ? { num_slots: Number(draft.num_slots) } : {}),
+        ...(draft.leverage ? { leverage: Number(draft.leverage) } : {}),
+      })} className="mt-4 w-full py-2 rounded-full bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold uppercase tracking-widest transition-colors duration-150">Apply account settings</button>
+      {result && <div data-testid="account-apply-result" className={`mt-2 text-[11px] font-mono rounded border px-2 py-1.5 ${result.ok ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>{result.ok ? `✓ ${result.msg}` : `✗ ${result.error}`}</div>}
+      <div className="mt-2 text-[10px] text-slate-500 font-mono">Equity reset is blocked while positions are open. Leverage multiplies notional (PnL and fees); in LIVE it calls the exchange's update-leverage for idle symbols first.</div>
+    </div>
+  );
+}
+
+function SlotAnalytics({ items, onToggle, onDigest, digestResult }) {
+  const traded = items.filter((r) => r.trades > 0).length;
+  return (
+    <section data-testid="slot-analytics-section">
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+        <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-slate-200" style={{fontFamily:"Outfit, sans-serif"}}>Slot Analytics · <span className="text-cyan-400">{traded} coins traded</span></h2>
+        <button data-testid="telegram-send-digest-btn" onClick={onDigest} className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-sky-700 hover:bg-sky-600 text-white text-[10px] font-bold uppercase tracking-widest transition-colors duration-150"><Send className="h-3 w-3"/> Send daily digest now</button>
+      </div>
+      {digestResult && <div data-testid="telegram-digest-result" className={`mb-2 text-[11px] font-mono ${digestResult.ok ? "text-emerald-300" : "text-rose-300"}`}>{digestResult.ok ? "✓ Digest delivered" : `✗ ${digestResult.error}`}</div>}
+      <div className="rounded-lg border border-[#1E2638] bg-[#121721] overflow-x-auto">
+        <table data-testid="slot-analytics-table" className="w-full text-xs font-mono">
+          <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-[#1E2638]">
+            <tr><th className="text-left px-3 py-2">Coin</th><th className="text-right px-3 py-2">Trades</th><th className="text-right px-3 py-2">Win %</th><th className="text-right px-3 py-2">Net ₹</th><th className="text-right px-3 py-2">Fees ₹</th><th className="text-right px-3 py-2">Avg hold</th><th className="text-right px-3 py-2">Tgt / T-O / SL</th><th className="text-right px-3 py-2">Basis %</th><th className="text-right px-3 py-2">Slot</th></tr>
+          </thead>
+          <tbody>
+            {items.map((r) => (
+              <tr key={r.coin} data-testid={`slot-analytics-row-${r.coin}`} className="border-b border-[#1E2638]/60 hover:bg-[#182030]">
+                <td className="px-3 py-2 font-bold text-slate-200">{r.coin}</td>
+                <td className="px-3 py-2 text-right">{r.trades}</td>
+                <td className="px-3 py-2 text-right text-cyan-300">{r.win_rate.toFixed(0)}%</td>
+                <td className={`px-3 py-2 text-right font-bold ${r.net_pnl_inr >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{r.net_pnl_inr >= 0 ? "+" : ""}{r.net_pnl_inr.toFixed(2)}</td>
+                <td className="px-3 py-2 text-right text-slate-500">{r.fees_inr.toFixed(2)}</td>
+                <td className="px-3 py-2 text-right text-slate-400">{r.avg_hold_sec.toFixed(1)}s</td>
+                <td className="px-3 py-2 text-right text-slate-400">{r.target_hits} / {r.timeouts} / {r.stops}</td>
+                <td className="px-3 py-2 text-right text-purple-300">{r.basis_pct.toFixed(3)}</td>
+                <td className="px-3 py-2 text-right">
+                  <button data-testid={`slot-analytics-toggle-${r.coin}`} onClick={() => onToggle(r.coin, r.paused)} className={`px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider transition-colors duration-150 ${r.paused ? "bg-amber-700 hover:bg-amber-600 text-white" : "bg-slate-800 hover:bg-slate-700 text-slate-100"}`}>{r.paused ? "Resume" : "Bench"}</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function BenchmarkPanel({ bench, verdict, onRun, running, duration, setDuration, fees, setFees }) {
   const res = bench?.result, part = bench?.partial;
   const view = running && part ? part : res;
@@ -280,6 +359,7 @@ function VerdictCard({ verdict, fees, setFees }) {
 
 const SOURCE_STYLE = {
   COINSWITCH_WS: "border-emerald-800 bg-emerald-950/40 text-emerald-300",
+  COINDCX_WS: "border-emerald-800 bg-emerald-950/40 text-emerald-300",
   SIMULATOR: "border-amber-700 bg-amber-950/30 text-amber-300",
   REST_POLLER: "border-orange-700 bg-orange-950/30 text-orange-300",
   STALE: "border-rose-800 bg-rose-950/40 text-rose-300",
@@ -295,7 +375,7 @@ function FeedHealthStrip({ feed }) {
   return (
     <section data-testid="laggard-feed-health-strip" className="rounded-lg border border-[#1E2638] bg-[#121721] px-4 py-3 flex flex-wrap items-center gap-3">
       <div className="flex items-center gap-2 mr-2">
-        <Radio className={`h-3.5 w-3.5 ${src === "COINSWITCH_WS" ? "text-emerald-400 animate-pulse" : "text-slate-500"}`} />
+        <Radio className={`h-3.5 w-3.5 ${src.endsWith("_WS") ? "text-emerald-400 animate-pulse" : "text-slate-500"}`} />
         <span className="text-xs font-semibold tracking-wide text-slate-300" style={{fontFamily:"Outfit, sans-serif"}}>Laggard Feed</span>
       </div>
       {pill("feed-source-badge", `SRC · ${src.replace("_", " ")}`, SOURCE_STYLE[src] || SOURCE_STYLE.STALE)}
@@ -400,6 +480,7 @@ function Dashboard() {
       hurdle_extra_pct: Number(cfgDraft.hurdle_extra_pct),
       timeout_seconds: Number(cfgDraft.timeout_seconds),
       stop_loss_pct: Number(cfgDraft.stop_loss_pct),
+      basis_filter: !!cfgDraft.basis_filter,
     });
     setSaving(false);
     pull();
@@ -425,6 +506,25 @@ function Dashboard() {
     pull();
   };
   const [coinFilter, setCoinFilter] = useState("");
+  const [analytics, setAnalytics] = useState([]);
+  const [accountResult, setAccountResult] = useState(null);
+  const [digestResult, setDigestResult] = useState(null);
+  useEffect(() => {
+    const go = async () => { try { const r = await axios.get(`${API}/analytics/coins`); setAnalytics(r.data.items || []); } catch (e) {} };
+    go(); const id = setInterval(go, 5000); return () => clearInterval(id);
+  }, []);
+  const applyAccount = async (body) => {
+    try {
+      const r = await axios.post(`${API}/account`, body);
+      const ch = Object.entries(r.data.changes).map(([k, v]) => `${k}=${v}`).join(", ") || "no changes";
+      setAccountResult({ ok: true, msg: `Applied: ${ch}${r.data.leverage_errors?.length ? ` · leverage errors: ${r.data.leverage_errors.length}` : ""}` });
+    } catch (e) { setAccountResult({ ok: false, error: e.response?.data?.detail || e.message }); }
+    pull();
+  };
+  const sendDigest = async () => {
+    try { await axios.post(`${API}/telegram/digest`); setDigestResult({ ok: true }); }
+    catch (e) { setDigestResult({ ok: false, error: e.response?.data?.detail || e.message }); }
+  };
   const togglePause = async (coin, paused) => {
     await axios.post(`${API}/coins/${coin}/${paused ? "resume" : "pause"}`);
     pull();
@@ -491,6 +591,9 @@ function Dashboard() {
             <span data-testid="usdt-inr-fx-rate-badge" className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-purple-800 bg-purple-950/30 text-purple-300 font-mono text-[10px] uppercase tracking-wider">
               USDT/INR · {fmtNum(status?.fx_usdt_inr, 4)}
             </span>
+            <span data-testid="leverage-slots-badge" className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-cyan-800 bg-cyan-950/30 text-cyan-300 font-mono text-[10px] uppercase tracking-wider">
+              {status?.leverage || 1}x · {status?.num_slots || 10} slots · {(status?.laggard_exchange || "coinswitch")}
+            </span>
             <button data-testid="paper-live-mode-toggle" onClick={toggleMode} className={`px-3 py-1.5 rounded-full border font-mono text-[10px] uppercase tracking-widest transition-colors duration-150 ${status?.mode === "PAPER" ? "border-amber-700 bg-amber-950/30 text-amber-300 hover:bg-amber-950/60" : "border-emerald-700 bg-emerald-950/30 text-emerald-300 hover:bg-emerald-950/60"}`}>
               MODE · {status?.mode || "…"}
             </button>
@@ -513,10 +616,12 @@ function Dashboard() {
 
         <FeedHealthStrip feed={telemetry?.feed} />
 
+        <AccountPanel status={status} onApply={applyAccount} result={accountResult} />
+
         {/* Spread monitor grid */}
         <section>
           <div className="flex items-center justify-between mb-3">
-            <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-slate-200" style={{fontFamily:"Outfit, sans-serif"}}>Real-time Spread Monitor · <span className="text-cyan-400">10 slots</span></h2>
+            <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-slate-200" style={{fontFamily:"Outfit, sans-serif"}}>Real-time Spread Monitor · <span className="text-cyan-400">{spreads.length || 10} coins · {status?.num_slots || 10} slots</span></h2>
             <button onClick={pull} className="text-xs text-slate-400 hover:text-slate-200 inline-flex items-center gap-1 transition-colors duration-150"><RefreshCw className="h-3 w-3"/> refresh</button>
           </div>
           <div data-testid="realtime-spread-slot-grid" className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
@@ -542,7 +647,7 @@ function Dashboard() {
                   <div className="mt-1 grid grid-cols-2 gap-1 text-[10px] font-mono text-slate-500">
                     <div>BIN ask <span className="text-slate-300">{fmtNum(sp.binance_ask, 4)}</span></div>
                     <div>CSW bid <span className="text-slate-300">{fmtNum(sp.coinswitch_bid, 4)}</span></div>
-                    <div className="col-span-2">peak 60s <span data-testid={`spread-peak-ratio-${sp.coin}`} className="text-slate-300">{Math.round((sp.peak_ratio_60s || 0) * 100)}%</span> of hurdle</div>
+                    <div className="col-span-2">peak 60s <span data-testid={`spread-peak-ratio-${sp.coin}`} className="text-slate-300">{Math.round((sp.peak_ratio_60s || 0) * 100)}%</span> of hurdle · basis <span data-testid={`spread-basis-${sp.coin}`} className="text-purple-300">{(sp.basis_pct ?? 0).toFixed(3)}%</span></div>
                   </div>
                 </div>
               );
@@ -591,6 +696,8 @@ function Dashboard() {
             </table>
           </div>
         </section>
+
+        <SlotAnalytics items={analytics} onToggle={togglePause} onDigest={sendDigest} digestResult={digestResult} />
 
         {/* Closed trades + Hourly summary side by side */}
         <section className="grid lg:grid-cols-3 gap-6">
@@ -662,6 +769,12 @@ function Dashboard() {
         <section className="grid lg:grid-cols-2 gap-6">
           <div data-testid="bot-config-controls-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
             <h3 className="font-semibold text-slate-200 mb-4" style={{fontFamily:"Outfit, sans-serif"}}>Signal & Risk Parameters</h3>
+            {cfgDraft && (
+              <label data-testid="basis-filter-toggle" className="mb-3 flex items-center justify-between gap-3 rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2 text-xs">
+                <span className="font-mono text-slate-300">Basis filter <span className="text-slate-500">· subtract rolling {cfgDraft.basis_window_s || 300}s median offset</span></span>
+                <input data-testid="basis-filter-checkbox" type="checkbox" checked={!!cfgDraft.basis_filter} onChange={(e) => setCfgDraft({ ...cfgDraft, basis_filter: e.target.checked })} className="h-4 w-4 accent-purple-500" />
+              </label>
+            )}
             {cfgDraft && (
               <div className="grid grid-cols-2 gap-3 text-xs">
                 {[

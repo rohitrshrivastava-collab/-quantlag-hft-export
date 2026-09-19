@@ -170,6 +170,10 @@ class CoinSwitchFuturesClient:
         return await self._request("POST", "/trade/api/v2/futures/cancel-all",
                                    body={"exchange": EXCHANGE_ID, "symbol": symbol.upper()})
 
+    async def update_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        return await self._request("POST", "/trade/api/v2/futures/leverage",
+                                   body={"exchange": EXCHANGE_ID, "symbol": symbol.upper(), "leverage": int(leverage)})
+
     # ------------------------- helpers ---------------------------------------
     async def wait_for_fill(self, order_id: str, timeout_s: float = 5.0,
                             poll_s: float = 0.25) -> Dict[str, Any]:

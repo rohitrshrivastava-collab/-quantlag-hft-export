@@ -75,6 +75,14 @@ class ConfigUpdate(BaseModel):
     hurdle_extra_pct: Optional[float] = None
     timeout_seconds: Optional[int] = None
     stop_loss_pct: Optional[float] = None
+    basis_filter: Optional[bool] = None
+    basis_window_s: Optional[int] = Field(default=None, ge=30, le=3600)
+
+
+class AccountUpdate(BaseModel):
+    equity_inr: Optional[float] = Field(default=None, gt=0, le=1e9)
+    num_slots: Optional[int] = Field(default=None, ge=1, le=50)
+    leverage: Optional[int] = Field(default=None, ge=1, le=100)
 
 
 # ------------------------- Routes -------------------------------------------
@@ -105,8 +113,8 @@ async def bot_mode(body: ModeUpdate):
     ENGINE.cfg.paper_trading = body.paper_trading
     mode = "PAPER" if body.paper_trading else "LIVE"
     warning = None
-    if not body.paper_trading and ENGINE.coinswitch is None:
-        warning = "CoinSwitch keys not configured — LIVE mode will not place orders. Set COINSWITCH_API_KEY/SECRET in backend/.env and restart the service."
+    if not body.paper_trading and not ENGINE._live_executor_ready():
+        warning = f"{ENGINE.cfg.laggard_exchange.upper()} keys not configured — LIVE mode will not place orders. Set the API key/secret in backend/.env and restart the service."
     # reset the once-per-flip warning latch so the next transition can log again
     ENGINE._live_missing_keys_warned = False
     await ENGINE.store.log("INFO", f"Mode switched to {mode}")
@@ -129,7 +137,50 @@ async def get_config():
         "num_slots": c.num_slots,
         "coins": c.coins,
         "simulate": c.simulate,
+        "basis_filter": c.basis_filter,
+        "basis_window_s": c.basis_window_s,
+        "leverage": c.leverage,
+        "laggard_exchange": c.laggard_exchange,
+        "coindcx_client_ready": ENGINE.coindcx is not None,
+        "digest_time_ist": c.digest_time_ist,
     }
+
+
+@api.post("/account")
+async def update_account(body: AccountUpdate):
+    """Manual Total Equity / slots / leverage. Equity reset requires no open positions."""
+    changes: Dict[str, Any] = {}
+    open_n = len(await ENGINE.store.all_open())
+    if body.equity_inr is not None:
+        if open_n:
+            raise HTTPException(status_code=409, detail=f"close {open_n} open position(s) before resetting equity")
+        await ENGINE.reset_account(body.equity_inr)
+        changes["equity_inr"] = body.equity_inr
+    if body.num_slots is not None:
+        ENGINE.cfg.num_slots = body.num_slots
+        changes["num_slots"] = body.num_slots
+        await ENGINE.store.log("INFO", f"Slots set to {body.num_slots} (₹{ENGINE.allocated_per_slot_inr():.2f}/slot)")
+    errors: List[str] = []
+    if body.leverage is not None:
+        errors = await ENGINE.apply_leverage(body.leverage)
+        changes["leverage"] = body.leverage
+    return {"ok": True, "changes": changes, "leverage_errors": errors, "status": ENGINE.snapshot()}
+
+
+@api.get("/analytics/coins")
+async def analytics_coins():
+    return {"items": ENGINE.coin_analytics()}
+
+
+@api.post("/telegram/digest")
+async def telegram_digest_now():
+    if not ENGINE.telegram.enabled:
+        raise HTTPException(status_code=400, detail="Telegram not configured")
+    try:
+        await ENGINE.send_daily_digest(raise_on_error=True, bench=BENCH.get("result"))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Telegram error: {e}")
+    return {"ok": True, "status": ENGINE.telegram.status()}
 
 
 @api.put("/config")
