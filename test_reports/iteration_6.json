@@ -1,0 +1,58 @@
+{
+  "summary": "Iteration 6: tested account controls (POST /api/account: slots/leverage/equity reset + validation + 409-on-open + restore), basis filter (raw_spread_pct, basis_pct, gross_spread_pct on /api/spreads; toggle via PUT /api/config), new /api/config fields (basis_filter, basis_window_s=300, leverage, laggard_exchange='coinswitch', coindcx_client_ready=false, digest_time_ist='23:30'), /api/analytics/coins (10 items with all required keys), POST /api/telegram/digest (called ONCE, sent_count incremented), and regression on /api/telemetry, /api/benchmark/status, /api/hurdle/simulate, coin pause/resume, CSV export. Backend: 10/10 pytest pass in /app/backend/tests/test_backend_iter6.py. Frontend: header leverage-slots-badge shows '1x · 10 slots · coinswitch' and updates to '2x · 8 slots · coinswitch' after Apply and back to '1x · 10 slots · coinswitch' after restore; account-controls-panel with all sub-testids present; account-apply-result shows '✓ Applied: num_slots=8, leverage=2'. slot-analytics-section has 10 rows; Bench LINK -> button becomes 'Resume' within ~6s and spread-slot-card-LINK shows PAUSED; resume restores. telegram-send-digest-btn present (not clicked in UI). basis-filter-toggle + checked basis-filter-checkbox; 10 spread-basis-<COIN> elements showing '%' values. 390px page has NO horizontal overflow (documentElement.scrollWidth==clientWidth==body.scrollWidth==390) — this fixes the ~224px regression from iter5. Bot left RUNNING, PAPER, 10 slots, leverage 1, no coins paused. 1 real Telegram digest sent.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Console (all viewports)", "issues": ["React hydration console error: <span> inside <option> — caused by Emergent tooling instrumentation injecting <span data-ve-dynamic style='display:contents'> children into <option> in benchmark-duration-select. Not an app bug; pollutes console. (Same issue flagged in iter5.)"]},
+      {"screen": "Equity chart on initial paint", "issues": ["Recharts warning: 'width(-1) height(-1) should be greater than 0' — the ResponsiveContainer briefly renders before parent has a layout size. Cosmetic; adds noise to console."]}
+    ]
+  },
+  "passed": [
+    "GET /api/status includes leverage=1, laggard_exchange='coinswitch', basis_filter=true, open_positions int, num_slots=10",
+    "POST /api/account {num_slots:5, leverage:3} -> 200 with changes, leverage_errors=[], status.allocated_per_slot_inr==equity/5, status.leverage==3, GET /api/status reflects it",
+    "POST /api/account {num_slots:0} -> 422; {leverage:101} -> 422; {equity_inr:-5} -> 422",
+    "POST /api/account {equity_inr:10000} -> 200 (after closing open positions when needed); status equity=10000, starting_capital=10000, realized_pnl=0, trades=0; /api/positions/closed history preserved; /api/equity-curve items reset (<50)",
+    "Restore POST /api/account {equity_inr:4000, num_slots:10, leverage:1} -> 200; status reflects",
+    "/api/spreads items all have raw_spread_pct, basis_pct, gross_spread_pct numeric; gross==raw-basis within 0.001 when basis_filter on",
+    "PUT /api/config {basis_filter:false} -> basis_filter false; within ~3s gross_spread_pct == raw_spread_pct on all items; PUT back true",
+    "GET /api/config includes basis_filter=true, basis_window_s=300, leverage, laggard_exchange='coinswitch', coindcx_client_ready=false, digest_time_ist='23:30'",
+    "GET /api/analytics/coins -> 10 items each with coin/trades/wins/losses/win_rate/net_pnl_inr/gross_pnl_inr/fees_inr/avg_hold_sec/timeouts/target_hits/stops/last_trade_ts/paused/basis_pct",
+    "POST /api/telegram/digest -> 200 {ok:true}; sent_count incremented (called ONCE)",
+    "Regression: /api/telemetry (COINSWITCH_WS, laggard 'coinswitch'), /api/benchmark/status (result present), /api/hurdle/simulate?hurdle_pct=0.1, coin pause/resume, CSV export all 200",
+    "Frontend header [data-testid=leverage-slots-badge] = '1x · 10 slots · coinswitch' (case-insensitive match on regex)",
+    "[data-testid=account-controls-panel] renders with account-equity-input, account-slots-input, account-leverage-input, account-apply-btn, account-exposure-badge",
+    "Apply slots=8 leverage=2 -> [data-testid=account-apply-result] = '✓ Applied: num_slots=8, leverage=2' and badge updates to '2x · 8 slots · coinswitch' within ~3.5s; restore 10/1 works",
+    "[data-testid=slot-analytics-section] with slot-analytics-table has exactly 10 slot-analytics-row-<COIN>; slot-analytics-toggle-LINK text 'Bench' -> click -> 'Resume' within ~6s and spread-slot-card-LINK shows PAUSED; second click restores",
+    "[data-testid=telegram-send-digest-btn] present (not clicked)",
+    "[data-testid=basis-filter-toggle] + basis-filter-checkbox checked; 10 elements matching [data-testid^=spread-basis-] with '%' text (e.g. '-0.012%')",
+    "390px viewport: documentElement.scrollWidth = clientWidth = body.scrollWidth = 390 → NO horizontal overflow (fixes iter5's ~224px regression)"
+  ],
+  "failed": [],
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter6.py",
+    "/app/test_reports/pytest/iter6.xml"
+  ],
+  "action_items": [
+    "LOW: Emergent tooling instrumentation injects <span> children into <option> elements → React hydration console error on load. Not an app bug; Emergent tooling team to fix.",
+    "LOW: Recharts 'width(-1) height(-1)' warning on initial render — set explicit minHeight on equity-chart ResponsiveContainer to suppress."
+  ],
+  "critical_code_review_comments": [
+    "AccountPanel + config polling look correct: the iter5 cfgDraft-reset bug appears to have been fixed elsewhere (regression test not performed here since Save Settings flow was out of scope for this iteration).",
+    "coindcx_client is present but not exercised in preview (coindcx_client_ready=false). LiveCoinDCXBookFeed reachability is untested here — will need coverage once LAGGARD_EXCHANGE=coindcx is enabled with keys.",
+    "Basis rolling-median (BASIS_WINDOW_S=300, min 20 samples) works but basis_pct values are small (~0.012%); ensure no divide-by-zero / empty deque paths in bot_engine._update_basis under a fresh restart."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_backend_iter6.py",
+    "/app/test_reports/iteration_6.json"
+  ],
+  "success_rate": {"backend": "100% (10/10)", "frontend": "100% of in-scope testids and integrations"},
+  "test_credentials": "none required",
+  "seed_data_creation": "none (equity reset did clear runtime pnl/curve but preserved closed history; restored to 4000/10/1)",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Bot left RUNNING in PAPER mode with num_slots=10, leverage=1, equity_inr=4000, basis_filter=true, no coins paused. 1 real Telegram digest was sent this iteration (telegram-send-digest-btn NOT clicked in UI to avoid a 2nd send). Regression file /app/backend/tests/test_backend_iter6.py has 10 tests covering account/basis/analytics/digest/regression — reuse as-is. When testing CoinDCX later, set LAGGARD_EXCHANGE=coindcx and provide COINDCX_API_KEY/SECRET; /api/config.coindcx_client_ready should flip to true and /api/telemetry.feed.source should reflect coindcx.",
+  "rca of the issue": "No blocking issues. Prior iter5 mobile 390px overflow (~224px) is resolved: scrollWidth==clientWidth==390. Prior iter5 cfgDraft-reset bug was not re-verified in this iteration (out of scope)."
+}

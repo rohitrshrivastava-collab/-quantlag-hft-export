@@ -188,3 +188,12 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
 - Dashboard → **Exchange Pair Benchmark** panel runs the same tool server-side and applies the verdict rules (`backend/verdict.py`).
 - Full comparison + decision framework: `docs/EXCHANGE_PAIR_DECISION.md`.
 - Rate limits: `CS_RATE_LIMIT_ORDERS_PER_MIN` (20) / `CS_RATE_LIMIT_DEFAULT_PER_MIN` (60) token buckets guard every CoinSwitch REST call.
+
+## Account, leverage & laggard selection
+| Var | Default | Meaning |
+|---|---|---|
+| `LEVERAGE` | `1` | Notional per slot = slot margin × leverage (also pushed to the exchange in LIVE). Change at runtime via dashboard → Account Controls (`POST /api/account`). |
+| `LAGGARD_EXCHANGE` | `coinswitch` | `coinswitch` or `coindcx` — selects the public book WS and the live executor. |
+| `COINDCX_API_KEY` / `COINDCX_API_SECRET` | empty | HMAC keys for CoinDCX Futures orders (LIVE only). |
+| `BASIS_FILTER` / `BASIS_WINDOW_S` | `true` / `300` | Subtract the rolling median CoinSwitch–Binance offset so a standing basis is not traded as lag. |
+| `DIGEST_TIME_IST` | `23:30` | Daily Telegram digest time (per-coin table, feed health, last benchmark). |

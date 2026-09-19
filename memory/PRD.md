@@ -111,14 +111,30 @@ SQLite persistence, paper/live toggle.
   overflow from recharts container (`min-w-0`).
 - Testing: `iteration_5.json` backend 17/17, frontend pass after fixes.
 
+### Iteration 6 (2026-06, "Account controls · Basis filter · CoinDCX adapter · Analytics · Digest")
+- `POST /api/account {equity_inr, num_slots, leverage}`: equity reset (zeroes
+  PnL/stats, keeps closed history, 409 while positions open); slots 1–50;
+  leverage 1–100 → notional = margin × lev (contracts, PnL, fees scale); LIVE
+  pushes `update_leverage` to CoinSwitch (`/futures/leverage`) or CoinDCX for
+  idle symbols. Dashboard "Account Controls" panel + header badge.
+- Basis filter (`BASIS_FILTER`, `BASIS_WINDOW_S`=300): rolling median of raw
+  spread subtracted before the hurdle gate; target price basis-adjusted;
+  `/api/spreads` adds `raw_spread_pct`, `basis_pct`; toggle in config panel.
+- CoinDCX adapter: `LiveCoinDCXBookFeed` (Socket.IO v2 deltas+snapshots) and
+  `coindcx_client.py` (HMAC-SHA256; market_order/cancel/list_orders/positions/
+  update_leverage/wallet). `LAGGARD_EXCHANGE=coindcx` switches feed + executor
+  (`_live_market` abstraction). Verified feed live from pod (124 ms wire).
+  COINDCX_API_KEY/SECRET empty until user supplies.
+- `GET /api/analytics/coins` + Slot Analytics table with Bench/Resume.
+- Daily digest `send_daily_digest` at `DIGEST_TIME_IST` (23:30) + `POST
+  /api/telegram/digest`; includes per-coin table, feed health, last benchmark.
+- Testing: `iteration_6.json` backend 10/10, frontend pass, 390px no overflow.
+
 ## Prioritized backlog
 - P1: Multi-source FX (Binance P2P median) for robustness beyond CoinGecko.
-- P1: Basis filter — subtract a rolling median CoinSwitch/Binance offset per
-  coin so persistent basis (seen on BNB: repeated TIMEOUT losses) is not
-  mistaken for lag.
-- P2: Per-coin filter on equity/closed-trade analytics; CoinDCX execution
-  adapter if Pair B wins the benchmark.
-- P2: Per-coin kill switch persistence across restarts.
+- P1: Live-test CoinDCX executor once user supplies COINDCX_API_KEY/SECRET
+  (order shape verified against docs, not against a real account yet).
+- P2: Persist paused coins / account settings across restarts (SQLite in CLI).
 - P2: Dynamic asset-universe screening (24h volume / liquidity).
 
 ## Deployment
