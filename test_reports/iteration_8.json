@@ -1,0 +1,55 @@
+{
+  "summary": "Iter 8: tested Replay Sweep, Coin Screener, Universe swap, Trade-history persistence + regressions. Backend: 16/16 pytest passes (test_backend_iter8.py). POST /api/replay/sweep {date=2026-09-19, hurdles=[0.05,0.1,0.15], basis_windows=[60,300]} -> 200 with 6-cell grid (all required keys), best = cell with max net_pnl_inr (hurdle 0.15 / window 300s -> ₹16.87, 9 trades, 88.9% win, DD 0.013%). Validation: 13 hurdles -> 400, bad date -> 404. Note spec expected empty hurdles -> 422 but backend returns 400 with 'grid too large (max 12 hurdles × 8 windows)' — accepted as reasonable but flagged. GET /api/screener?top_n=10 -> candidates=74, binance_source='fallback_list' (Binance geo-blocked, expected), coindcx_instruments=526, lag_data_coins>=1, recommended=10, add/drop lists present, rows sorted by score desc, BTC volume_24h_usdt > 1e9 with numeric lag_p95_dev_bps and tracked=true, untracked rows have lag_p95_dev_bps=null, current list echoes active universe. POST /api/universe {coins:['BTC','ETH','SOL']} -> 200 {ok, coins, running:true}; within 25s /api/spreads had 3 items with non-null coinswitch_bid, telemetry.feed.laggard.coins had 3, /app/data/settings.json config.coins=['BTC','ETH','SOL'], /api/analytics/coins had 3 items. Validation {coins:[]} -> 422. Restored to 10-coin universe ['BTC','ETH','SOL','XRP','BNB','DOGE','ADA','AVAX','NEAR','LINK'] within ~10s. Trade-history persistence: /app/data/trades.json has open/closed/equity_curve keys; after `sudo supervisorctl restart backend` /api/positions/closed?limit=5000 count preserved (>= pre-restart count), /api/equity-curve returned items>1. POST /api/coindcx/check -> 424 with 'CoinDCX API 401'. Regression 200: /status, /spreads, /telemetry, /benchmark/status, /hurdle/simulate?hurdle_pct=0.1, /replay/run. (GET /api/account is 405 — endpoint is POST only; removed from regression checks.) Frontend: replay-sweep-panel with sweep-date-select/sweep-hurdles-input/sweep-windows-input/sweep-run-btn all present. Setting 0.05,0.1,0.15 x 60,300 and clicking Run sweep -> sweep-heat-table within ~2s, all 6 sweep-cell-<h>-<w> testids present, sweep-best text: '★ Best: hurdle 0.15% · window 300s → ₹16.87 over 9 trades (88.9% win, DD 0.013%)'. coin-screener-panel: click screener-run-btn -> screener-table appears in <3s with 30 rows, 10 initially checked (label 'Apply universe (10)'), screener-add-badge (+ZEC,UNI,HYPE) and screener-drop-badge (-BNB,AVAX,LINK) visible; unchecking one pick -> label becomes 'Apply universe (9)'. Did NOT click Apply (per instructions). Regression testids present: session-replay-panel, account-controls-panel, slot-analytics-section, leverage-slots-badge. No horizontal overflow at 390px (sw=cw=bw=390). Final state: universe restored to ['BTC','ETH','SOL','XRP','BNB','DOGE','ADA','AVAX','NEAR','LINK'] exactly, bot RUNNING, PAPER, 10 slots, leverage 1, no coins paused, no Telegram sent.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/replay/sweep", "issue": "Empty hurdles list returns 400 with detail 'grid too large (max 12 hurdles × 8 windows)' instead of the spec-expected 422. The size guard fires before Pydantic min-length validation, and the error message is misleading for an empty input. Suggest adding Field(min_length=1) on hurdles/basis_windows so it 422s with a clear message; or short-circuit to a 422 when list is empty."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Console (all viewports)", "issues": ["Persistent React hydration error 'In HTML, <span> cannot be a child of <option>' from Emergent tooling injecting <span data-ve-dynamic> inside <option> in benchmark-duration-select — flagged since iter5, not an app bug.", "Recharts warning 'width(-1) and height(-1) of chart should be greater than 0' — chart containers briefly render at -1 during collapse/expand or off-screen; cosmetic only."]}
+    ]
+  },
+  "passed": [
+    "POST /api/replay/sweep 6-cell grid with all required per-cell keys; best cell equals max net_pnl_inr; 13 hurdles->400; bad date->404",
+    "GET /api/screener?top_n=10 schema, sorted by score desc, BTC vol>1e9 with numeric lag, untracked lag null, recommended=10",
+    "POST /api/universe swap to 3 coins: spreads=3 items with quotes in <25s, telemetry laggard.coins=3, settings.json coins=[BTC,ETH,SOL], analytics/coins=3; {coins:[]}->422; restore to 10-coin universe within <10s",
+    "trades.json contains open/closed/equity_curve; closed count preserved after backend restart; /api/equity-curve populated",
+    "POST /api/coindcx/check -> 424 with 'CoinDCX API 401'",
+    "Regression 200: /status /spreads /telemetry /benchmark/status /hurdle/simulate?hurdle_pct=0.1 /replay/run",
+    "Frontend replay-sweep-panel and all sub-testids; heat table with 6 cells; sweep-best starts with '★'",
+    "Frontend coin-screener-panel: 30 rows, 10 pre-checked, add/drop badges visible, apply label 'Apply universe (10)' -> '(9)' on uncheck",
+    "No horizontal overflow at 390px",
+    "Final state: universe=['BTC','ETH','SOL','XRP','BNB','DOGE','ADA','AVAX','NEAR','LINK'], running=true, mode=PAPER, slots=10, lev=1, paused=[]"
+  ],
+  "failed": [],
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter8.py",
+    "/app/test_reports/pytest/iter8.xml"
+  ],
+  "action_items": [
+    "MINOR: /api/replay/sweep -> empty hurdles/basis_windows currently 400 with 'grid too large' — should be 422 (Field(min_length=1)) for cleaner client error handling. Spec expected 422."
+  ],
+  "critical_code_review_comments": [
+    "Replay sweep grid deterministic: for today's ticks the 0.15%/300s cell dominates at ₹16.87 (9 trades, 88.9% win, DD 0.013%), matching the single-run replay behavior — good consistency between /replay/run and /replay/sweep engines.",
+    "Screener correctly degrades to binance_source='fallback_list' when Binance REST is geo-blocked from this pod (candidates still >=20). CoinDCX universe size 526 confirms full instrument list is fetched.",
+    "Universe swap correctly closes any open positions before re-init: verified /api/positions/open drained by _close_all_open helper prior to POST /api/universe, feeds restarted within ~25s. settings.json persists coins list.",
+    "Trade-history persistence works across sudo supervisorctl restart backend: closed-position count preserved (>= pre-restart), equity_curve restored. trades.json layout {open, closed, equity_curve} is clean.",
+    "Nit: GET /api/account returns 405 — endpoint is POST only. Consider adding a GET handler that returns current account settings (num_slots, leverage, starting_capital_inr, paper_trading) since the frontend already reads these from /api/status; would simplify future dashboards."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_backend_iter8.py",
+    "/app/test_reports/iteration_8.json"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% of in-scope testids and integrations"},
+  "test_credentials": "none required",
+  "seed_data_creation": "Universe temporarily swapped to [BTC,ETH,SOL] and restored to the required 10-coin order. Backend restarted once via sudo supervisorctl to validate trades.json hydration.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Bot RUNNING, PAPER, 10 slots, leverage 1, universe=['BTC','ETH','SOL','XRP','BNB','DOGE','ADA','AVAX','NEAR','LINK'] (note this differs from earlier iterations where BNB was 4th and XRP 5th — iter8 restored to the spec-required XRP-before-BNB order via POST /api/universe). trades.json persists across restarts. /api/replay/sweep empty-hurdle behavior returns 400 (not 422) — pending fix. GET /api/account is 405 (POST-only). Reusable regression file: /app/backend/tests/test_backend_iter8.py (16 tests; note test_trades_json_and_restart_persistence restarts backend via supervisorctl).",
+  "rca of the issue": "No blocking issues found. Minor spec deviation: POST /api/replay/sweep with empty hurdles returns 400 ('grid too large') rather than 422 because size validation fires before empty-list validation; add Field(min_length=1) on SweepRequest.hurdles/basis_windows to fix."
+}

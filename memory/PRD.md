@@ -151,12 +151,28 @@ SQLite persistence, paper/live toggle.
 - Testing: `iteration_7.json` backend + frontend all pass (incl. restart
   persistence round-trip).
 
+### Iteration 8 (2026-06, "Replay Sweep · Coin Screener · Trade persistence · CoinDCX recheck")
+- `POST /api/replay/sweep` grid (hurdle × basis window, ticks loaded once) →
+  heat table + best cell in dashboard SweepPanel. First real-data result:
+  hurdle 0.10–0.15% / 300 s window profitable (80–89% win) vs 0.05% losing.
+- `screener.py`: CoinDCX futures 24h quote volume (`v`) ∩ Binance perps
+  (exchangeInfo, fallback static list when geo-blocked) × lag activity (p95
+  |divergence| bps from today's ticks; unknown coins get the observed median
+  lag score). `GET /api/screener`, `POST /api/universe` → `BotEngine.set_coins`
+  (rebuilds per-coin state + feeds, refuses with open positions, persisted).
+- `MemoryStore` persistence → `data/trades.json` (open/closed/equity curve),
+  restored on startup. CoinDCX keys still 401 (user to fix on exchange side).
+- Testing: `iteration_8.json` backend 16/16, frontend pass.
+
+## Current data files (DATA_DIR, default /app/data)
+- `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
+
 ## Prioritized backlog
 - P1: CoinDCX keys currently rejected (401) — re-verify after user fixes IP
   whitelist / permissions; then live-test `_live_market` on Pair B.
-- P2: Persist open positions / closed history for the web store (CLI uses SQLite).
-- P2: Dynamic asset-universe screening (24h volume / liquidity).
-- P2: Replay parameter sweep (grid over hurdle × basis window) with heat table.
+- P2: Scheduled auto-screening (daily re-rank + Telegram proposal, optional auto-apply).
+- P2: Multi-day replay (concatenate several tick files) and sweep over timeout/stop too.
+- P2: Verify CoinSwitch PRO listing of screener picks via `instrument_info` once keys exist.
 
 ## Deployment
 - EC2 t3.small (Mumbai) recommended. Use `tmux` + `python standalone_bot/run_bot.py`.

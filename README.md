@@ -203,3 +203,8 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
 - USDT/INR = median of CoinGecko, CoinDCX spot USDTINR and Binance P2P; sources visible in the dashboard config panel.
 - Session Replay panel / `POST /api/replay/run` replays any recorded day through the engine rules with your own hurdle / basis / leverage / slots.
 - `POST /api/coindcx/check` — CoinDCX Futures key preflight (dashboard "Check CoinDCX").
+
+## Replay sweep, coin screener & trade persistence
+- `POST /api/replay/sweep {date, hurdles[], basis_windows[]}` → net-PnL heat table (dashboard "Replay Sweep").
+- `GET /api/screener?top_n=10` ranks the CoinDCX-futures ∩ Binance-perps universe by 24h volume × lag activity; `POST /api/universe {coins}` swaps the traded set (feeds restart, no open positions allowed).
+- Open/closed trades and the equity curve persist in `data/trades.json` across restarts.

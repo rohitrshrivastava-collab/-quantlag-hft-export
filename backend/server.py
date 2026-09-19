@@ -259,7 +259,9 @@ class SweepRequest(BaseModel):
 async def replay_sweep_run(body: SweepRequest):
     if REPLAY["running"]:
         raise HTTPException(status_code=409, detail="replay already running")
-    if not (1 <= len(body.hurdles) <= 12 and 1 <= len(body.basis_windows) <= 8):
+    if not body.hurdles or not body.basis_windows:
+        raise HTTPException(status_code=422, detail="hurdles and basis_windows must be non-empty")
+    if len(body.hurdles) > 12 or len(body.basis_windows) > 8:
         raise HTTPException(status_code=400, detail="grid too large (max 12 hurdles × 8 windows)")
     if any(h <= 0 or h > 10 for h in body.hurdles) or any(w < 30 or w > 3600 for w in body.basis_windows):
         raise HTTPException(status_code=422, detail="hurdles in (0,10], windows in [30,3600]")
