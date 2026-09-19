@@ -1,0 +1,72 @@
+{
+  "summary": "Iteration 5: tested per-coin pause/resume, closed-trade CSV export + coin filter, hurdle tuner, latency benchmark run/status/verdict, and telemetry regressions. Backend pytest: 17/17 pass in re-run (one flaky failure on TestBenchmark::test_status_has_result during the very first xdist parallel invocation while the initial 30s benchmark result was still transitioning; re-run passed). Benchmark ran successfully 30s BTC/ETH/SOL with real Binance/CoinSwitch/CoinDCX WS. Frontend: pause toggle, closed-trades filter, CSV href, hurdle-tuner panel, benchmark panel + run + progress, and verdict card all render and mostly work. Discovered a HIGH priority frontend bug: the /api/status polling interval (1.5s) resets cfgDraft to server config every tick, so users cannot edit Signal & Risk Parameters (entry_fee, exit_fee, slippage, extra hurdle, timeout, stop loss) — anything typed reverts within ~1-1.5s. This breaks the hurdle-tuner draft flow (spec says extra=0 should give DRAFT 0.130%; observed the input reverts to 0.02 within a second and the badge stays at 0.150%). Verdict-card fee inputs (verdict-fee-coinswitch-input / coindcx) use local state and are NOT affected — the coindcx fee edit to 0.02 correctly updated the verdict row hurdle to 0.09%. Also mobile 390px viewport has ~224px horizontal overflow (worse than iter4's 41px), likely from BenchmarkPanel/VerdictCard fixed widths. Bot left RUNNING, PAPER mode, no coins paused. Zero real Telegram messages sent this iteration.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/benchmark/status", "issue": "Flaky in the very first parallel pytest run — TestBenchmark::test_status_has_result asserted divergence_bps.p50 on the current /result while another concurrent test may have been ending. Re-running the same test in isolation passed. Suggest guarding /benchmark/run with an idle-check race and ensuring the persisted last_result.json is atomic (write to .tmp then rename)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "BotConfigControlsPanel + HurdleTuner (Dashboard.pull interval)", "issue": "The polling interval created in useEffect(pull, 1500, []) captures the initial pull closure where cfgDraft is null; every tick therefore runs setCfgDraft(cfg.data), overwriting whatever the user typed. Result: extra-hurdle input reverts to 0.02 within ~1.5s of typing and DRAFT badge stays at 0.150% instead of 0.130%. All 6 config inputs are affected (entry/exit fee, slippage, extra hurdle, timeout, stop loss). Save Settings still works because the values in-flight during the click may be captured, but the interactive draft-tuner UX is broken.", "selector": "[data-testid=config-hurdle-gate-input] and other config inputs", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard @ 390px width", "issues": ["Body scrollWidth=614px vs viewport=390px → ~224px horizontal overflow (regression from iter4's ~41px). Benchmark table itself is correctly wrapped in an overflow-x:auto container (parent clientWidth=314), but something else (likely the fee-inputs grid inside VerdictCard or the 3-column benchmark header row using min-content) is expanding the page. Add min-w-0 / overflow-x-hidden on outer sections or make VerdictCard fee grid stack on <sm."]}
+    ]
+  },
+  "passed": [
+    "GET /api/positions/closed?coin=ADA returns only ADA (empty here) — filter works",
+    "GET /api/positions/closed/export.csv → 200, text/csv, Content-Disposition attachment filename quantlag_trades_all_<ts>.csv, header row contains id,coin,direction,mode,size_inr,net_pnl_inr,close_reason,opened_at_iso,closed_at_iso,hold_sec",
+    "GET /api/positions/closed/export.csv?coin=BTC → filename contains _BTC_ and rows (if any) all BTC",
+    "POST /api/coins/ETH/pause → {ok:true, paused:true, paused_coins:['ETH']}; /api/spreads ETH.paused=true and signal_state='PAUSED' within 2s",
+    "POST /api/coins/ETH/resume → paused=false, signal_state returns to WAITING",
+    "POST /api/coins/FOO/pause → 404",
+    "GET /api/hurdle/simulate?hurdle_pct=0.05 → {draft,current} with covered_s/total_episodes/total_seconds_above/coins(10 items); current.hurdle_pct=0.15",
+    "hurdle_pct=0.02 gives total_episodes >= hurdle_pct=0.15's total_episodes",
+    "hurdle_pct=0 → 400; hurdle_pct=20 → 400",
+    "GET /api/benchmark/status: running=false, result has binance/coinswitch/coindcx with tcp_rtt_ms.p50 (n>0), ws_tick_to_receipt_ms.p50/p99 (n>0), ws_msgs>0, ws_msgs_per_s, ws_max_gap_ms, ws_reconnects, spread_bps_median, depth_10bps_usdt_median. Binance.divergence_bps=null (leader). coinswitch & coindcx have divergence_bps{p50,p99} and divergence_quantiles (list of 101 floats)",
+    "POST /api/benchmark/run duration_s=10 symbols=[BTC] → 200 while idle; immediate second call → 409 'benchmark already running'; status.running=true with partial.elapsed_s; after ~11s running=false, result.duration_s=10 symbols=['BTC']",
+    "POST /api/benchmark/run duration_s=5 → 422 pydantic validation error (ge=10)",
+    "GET /api/benchmark/verdict → winner in ['coinswitch','coindcx'], winner_pair, winner_label, margin, confidence, any_qualified, rows[2] sorted desc by score.total; each row has exchange/pair/taker_fee_pct/hurdle_pct/hurdle_bps/exec_rtt_est_ms/gate_feed/gate_exec/qualified/opportunity_share/opportunities_per_min/mean_excess_bps/expected_inr_per_hour/score{net_edge,fees,latency,book,stability,total}/flags",
+    "Default verdict: coinswitch row taker_fee_pct==0.05 (engine entry fee)",
+    "Query ?coinswitch_fee_pct=0.1&coindcx_fee_pct=0.02 → coindcx row taker_fee_pct=0.02, hurdle_pct=0.09 (2*0.02+0.03+0.02)",
+    "GET /api/telemetry: feed.source COINSWITCH_WS, telegram.enabled=true, feed.rest_fallback.rate_limiter=null (no CoinSwitch keys)",
+    "Regression: /api/status /api/config /api/spreads (items.paused bool, heat 60 cells, near_hurdle_hits_60s, peak_ratio_60s) /api/logs /api/telegram/status all 200",
+    "Frontend: [data-testid^=spread-pause-toggle-] present on each spread card; clicking spread-pause-toggle-ETH → 'PAUSED' badge shown on spread-slot-card-ETH within ~3s, button turns amber; clicking again resumes (no PAUSED text)",
+    "Frontend: closed-trades header has [data-testid=closed-trades-coin-filter] (11 options: 'All coins' + 10 coins) and [data-testid=closed-trades-export-csv-btn] whose href ends /api/positions/closed/export.csv → after selecting BTC href becomes /api/positions/closed/export.csv?coin=BTC",
+    "Frontend: [data-testid=hurdle-tuner-panel] renders with draft-badge='DRAFT 0.150%', draft-count and current-count (both '1 signals'), 11 coin chips (10 coins + hurdle-tuner-coin-row parent) actually 10 chips at [data-testid^=hurdle-tuner-coin-]",
+    "Frontend: [data-testid=latency-benchmark-panel] renders. duration-select, run-btn present. Rows benchmark-row-binance/coinswitch/coindcx present with numeric TCP p50/p99 and tick numbers. Verdict-card shows winner starting 'Pair A'/'Pair B', verdict-confidence 'margin X pts · confidence: MEDIUM', verdict-row-coinswitch/coindcx with verdict-score-* values (57.8, 51.5 observed)",
+    "Frontend: Selecting 30s and clicking benchmark-run-btn → button shows ' Running N%' and [data-testid=benchmark-progress-bar] appears; after ~35s the last-run timestamp refreshes",
+    "Frontend: Editing [data-testid=verdict-fee-coindcx-input] to 0.02 → coindcx row shows 'hurdle (2×fee+slip+extra) 0.09% = 9 bps' within ~3s (local-state input, NOT affected by polling bug)",
+    "Frontend regression: Laggard-feed strip, equity chart, Telegram panel (CONFIGURED · @Rohittelegram_bot), header badges (WS LIVE, USDT/INR, PAPER) all render; benchmark table container has overflow-x:auto on mobile"
+  ],
+  "failed": [
+    "Hurdle tuner draft update flow: typing '0' into [data-testid=config-hurdle-gate-input] does NOT propagate — input reverts to 0.02 within ~1.5s (before the 3s hurdle-sim poll fires) and DRAFT badge stays at 0.150%. Root cause: pull() interval closure resets cfgDraft every tick when cfgDraft is still perceived as null in that closure.",
+    "Mobile 390px page overflow: scrollWidth=614 vs viewport=390 (~224px horizontal scroll)"
+  ],
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter5.py",
+    "/app/test_reports/pytest/iter5.xml"
+  ],
+  "action_items": [
+    "HIGH: Fix cfgDraft-reset bug. Options: (a) drop the `if (!cfgDraft)` and only initialize cfgDraft on first successful fetch via a ref, (b) move the interval into useEffect with correct deps or use useRef to hold the latest cfgDraft, (c) split config polling into a separate effect that only sets cfgDraft when it's null via a functional setter: `setCfgDraft(prev => prev || cfg.data)`. Approach (c) is a 1-line fix.",
+    "MEDIUM: Fix mobile 390px overflow (~224px). Investigate BenchmarkPanel (3-column duration+run row and 3-col fee-inputs grid inside VerdictCard) — likely a fixed-width children on <sm. Add flex-wrap / grid-cols-1 sm:grid-cols-3 pattern and min-w-0 on children.",
+    "LOW: Persist benchmark last_result.json atomically (write-then-rename) to avoid rare partial reads during the transition when a new run finishes just as another test reads status.",
+    "LOW: Emergent-tooling injects <span> children into <option> elements causing a React hydration console error. Not a real app bug but pollutes console — Emergent instrumentation team."
+  ],
+  "critical_code_review_comments": [
+    "App.js line 373-378: `useEffect(() => { pull(); const id=setInterval(pull, 1500); return...}, [])` — pull captured closure includes cfgDraft state. The empty-deps interval will never see updated cfgDraft, so the `if (!cfgDraft) setCfgDraft(cfg.data)` guard is effectively ALWAYS TRUE inside the interval → cfgDraft is reset on every 1.5s tick, blocking all user edits to config inputs. Change to `setCfgDraft(prev => prev || cfg.data)` to fix.",
+    "App.js line 442: hurdle-simulate effect depends on draftHurdle which is derived from cfgDraft — the bug above prevents this from ever changing.",
+    "BENCH state is process-global with an in-memory task; if server reboots mid-run, last_result.json won't be updated. Consider persisting `running` state or clearing it on startup."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter5.py", "/app/test_reports/iteration_5.json"],
+  "success_rate": {"backend": "100% (17/17 on re-run; 1 flaky on first xdist parallel run)", "frontend": "~92% (all data-testids render + integrations work EXCEPT hurdle-tuner draft flow due to cfgDraft polling bug)"},
+  "test_credentials": "none required",
+  "seed_data_creation": "none",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Bot left RUNNING in PAPER mode, no coins paused. Backend last benchmark result is a fresh 30s BTC/ETH/SOL run. When re-testing the cfgDraft fix, verify that typing into [data-testid=config-hurdle-gate-input]=0 persists and the [data-testid=hurdle-tuner-draft-badge] updates to 'DRAFT 0.130%' within ~4s. Do NOT click Save Settings during the test (draft only). Existing test file /app/backend/tests/test_backend_iter5.py can be reused as regression — includes 17 tests across closed-CSV, coin-pause, hurdle-sim, benchmark (run+status+verdict, incl. concurrent 409), and telemetry. No Telegram messages sent in iter5.",
+  "rca of the issue": "cfgDraft reset RCA: Dashboard.pull is defined inline in the component body every render. useEffect with empty deps creates the setInterval once with the FIRST render's pull closure. That closure references cfgDraft (initial value = null), so `if (!cfgDraft) setCfgDraft(cfg.data)` evaluates as `if (!null) …` on every 1.5s tick, unconditionally overwriting cfgDraft with the server value. This clobbers whatever the user typed. Reproduction: open the dashboard, focus [data-testid=config-hurdle-gate-input], type '0', observe input reverts to '0.02' within ~1.5s. Fix: use functional setter `setCfgDraft(prev => prev || cfg.data)` OR store cfgDraft in a ref-guarded init OR move the interval into an effect that re-runs on cfgDraft changes. One-line fix at App.js:369 recommended."
+}

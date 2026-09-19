@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { Activity, Zap, TrendingUp, TrendingDown, Play, Square, RefreshCw, Radio, Cpu, Wallet, Timer, Target, Send, Flame, Pause, Download, Gauge, Trophy } from "lucide-react";
@@ -69,7 +69,7 @@ function EquityCurveChart({ points = [], start }) {
   const pad = Math.max((max - min) * 0.15, (start || 4000) * 0.0025);
   const fmtT = (t) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return (
-    <div data-testid="equity-curve-chart-card" className="rounded-lg border border-[#1E2638] bg-[#121721] p-4 sm:p-5">
+    <div data-testid="equity-curve-chart-card" className="rounded-lg border border-[#1E2638] bg-[#121721] p-4 sm:p-5 min-w-0 overflow-hidden">
       <div className="flex items-center justify-between mb-3">
         <div>
           <h3 className="font-semibold text-slate-200" style={{fontFamily:"Outfit, sans-serif"}}>Equity Curve</h3>
@@ -343,6 +343,7 @@ function Dashboard() {
   const [equity, setEquity] = useState([]);
   const [saving, setSaving] = useState(false);
   const [cfgDraft, setCfgDraft] = useState(null);
+  const cfgDraftInit = useRef(false);
   const [liveCheck, setLiveCheck] = useState(null);
   const [telemetry, setTelemetry] = useState(null);
 
@@ -366,7 +367,7 @@ function Dashboard() {
       setEquity(eq.data.items || []);
       setConfig(cfg.data);
       setTelemetry(tm.data);
-      if (!cfgDraft) setCfgDraft(cfg.data);
+      if (!cfgDraftInit.current) { cfgDraftInit.current = true; setCfgDraft(cfg.data); }
     } catch (e) { console.error(e); }
   };
 
@@ -523,9 +524,9 @@ function Dashboard() {
               const positive = (sp.gross_spread_pct || 0) >= 0;
               return (
                 <div key={sp.coin} data-testid={`spread-slot-card-${sp.coin}`} className="rounded-lg border border-[#1E2638] bg-[#121721] p-3 transition-colors duration-150 hover:bg-[#182030] hover:border-slate-700">
-                  <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center justify-between gap-1 mb-1 flex-wrap">
                     <div className="font-bold text-sm tracking-wide">{sp.coin}<span className="text-slate-500 text-[10px] ml-1">/INR</span></div>
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-1 min-w-0">
                       <button data-testid={`spread-pause-toggle-${sp.coin}`} onClick={() => togglePause(sp.coin, sp.paused)} title={sp.paused ? "Resume slot" : "Pause slot (no new entries)"} className={`h-5 w-5 grid place-items-center rounded border transition-colors duration-150 ${sp.paused ? "border-amber-700 bg-amber-950/40 text-amber-300 hover:bg-amber-900/40" : "border-[#1E2638] text-slate-500 hover:text-slate-200 hover:border-slate-600"}`}>
                         {sp.paused ? <Play className="h-2.5 w-2.5"/> : <Pause className="h-2.5 w-2.5"/>}
                       </button>
@@ -593,7 +594,7 @@ function Dashboard() {
 
         {/* Closed trades + Hourly summary side by side */}
         <section className="grid lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
+          <div className="lg:col-span-2 space-y-6 min-w-0">
             <EquityCurveChart points={equity} start={status?.starting_capital_inr} />
             <div>
             <div className="flex items-center justify-between gap-2 flex-wrap mb-3">

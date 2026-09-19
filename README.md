@@ -182,3 +182,9 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
   absorb worst-case taker slippage.
 - Live exits use `reduce_only=true` — they can never accidentally flip your
   position to the opposite side.
+
+## Exchange-pair decision kit (CoinSwitch PRO vs CoinDCX)
+- `python benchmark/latency_bench.py --duration 60 --symbols BTC,ETH,SOL --json out.json` — TCP RTT + WS tick-to-receipt p50/p99, stability, book quality and divergence for Binance / CoinSwitch / CoinDCX (`pip install -r benchmark/requirements.txt`).
+- Dashboard → **Exchange Pair Benchmark** panel runs the same tool server-side and applies the verdict rules (`backend/verdict.py`).
+- Full comparison + decision framework: `docs/EXCHANGE_PAIR_DECISION.md`.
+- Rate limits: `CS_RATE_LIMIT_ORDERS_PER_MIN` (20) / `CS_RATE_LIMIT_DEFAULT_PER_MIN` (60) token buckets guard every CoinSwitch REST call.

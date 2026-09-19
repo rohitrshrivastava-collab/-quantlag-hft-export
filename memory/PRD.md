@@ -86,11 +86,39 @@ SQLite persistence, paper/live toggle.
 - Testing: backend 8/8 after fix (bot_username resolved at start), frontend
   all pass (`iteration_4.json`).
 
+### Iteration 5 (2026-06, "Ops kit + Exchange-pair decision kit")
+- `backend/rate_limiter.py` TokenBucket/RateLimiterGroup; wired into
+  `CoinSwitchFuturesClient._request` (orders 20/min, default 60/min via
+  `CS_RATE_LIMIT_*` env) + 429 retry with jitter; stats in
+  `telemetry.feed.rest_fallback.rate_limiter`.
+- CSV export `GET /api/positions/closed/export.csv?coin=` + `?coin=` filter on
+  `/api/positions/closed`; dashboard select + Export button.
+- Per-coin kill switch `POST /api/coins/{coin}/pause|resume`; `PAUSED` signal
+  state; pause/play button on each spread card.
+- Hurdle tuner `GET /api/hurdle/simulate?hurdle_pct&window_s` (episodes of
+  |spread| ≥ hurdle over 10-min heat retention); live panel under config.
+- `benchmark/latency_bench.py` (asyncio + websockets): TCP RTT, WS
+  tick-to-receipt p50/p99, msg/s, max gap, reconnects, spread bps, depth
+  ±10 bps, divergence-vs-Binance quantiles for Binance/CoinSwitch/CoinDCX.
+  Server-side runner `POST /api/benchmark/run`, `GET /api/benchmark/status`,
+  result persisted to `benchmark/last_result.json`.
+- `backend/verdict.py` decision rules (gates + 100-pt score) →
+  `GET /api/benchmark/verdict?coinswitch_fee_pct&coindcx_fee_pct`; dashboard
+  Benchmark panel + Verdict card with live fee inputs.
+- `docs/EXCHANGE_PAIR_DECISION.md`: benchmark guide, CoinSwitch vs CoinDCX
+  mechanics table, verdict framework + recommendation.
+- Fixed: config draft reset every poll (stale closure → useRef), mobile
+  overflow from recharts container (`min-w-0`).
+- Testing: `iteration_5.json` backend 17/17, frontend pass after fixes.
+
 ## Prioritized backlog
 - P1: Multi-source FX (Binance P2P median) for robustness beyond CoinGecko.
-- P1: Token-bucket rate limiter around REST fan-out.
-- P2: CSV export of closed trades, per-coin filter.
-- P2: Per-coin kill switch (pause a slot without stopping the whole bot).
+- P1: Basis filter — subtract a rolling median CoinSwitch/Binance offset per
+  coin so persistent basis (seen on BNB: repeated TIMEOUT losses) is not
+  mistaken for lag.
+- P2: Per-coin filter on equity/closed-trade analytics; CoinDCX execution
+  adapter if Pair B wins the benchmark.
+- P2: Per-coin kill switch persistence across restarts.
 - P2: Dynamic asset-universe screening (24h volume / liquidity).
 
 ## Deployment
