@@ -228,6 +228,84 @@ function ReplayPanel({ sessions, recorder, config, status, onRun, result, runnin
   );
 }
 
+function SweepPanel({ sessions, onRun, result, running }) {
+  const [date, setDate] = useState("");
+  const [hurdles, setHurdles] = useState("0.05, 0.08, 0.10, 0.12, 0.15, 0.20");
+  const [windows, setWindows] = useState("60, 180, 300, 600");
+  useEffect(() => { if (!date && sessions?.length) setDate(sessions[0].date); }, [sessions, date]);
+  const parse = (s) => s.split(",").map((x) => Number(x.trim())).filter((x) => x > 0);
+  const r = result;
+  const hs = r?.hurdles || [], ws = r?.basis_windows || [];
+  const cell = (h, w) => r?.grid?.find((g) => g.hurdle_pct === h && g.basis_window_s === w);
+  const maxAbs = Math.max(0.01, ...(r?.grid || []).map((g) => Math.abs(g.net_pnl_inr)));
+  return (
+    <section data-testid="replay-sweep-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <h3 className="font-semibold text-slate-200 inline-flex items-center gap-2" style={{fontFamily:"Outfit, sans-serif"}}><Flame className="h-4 w-4 text-amber-400"/> Replay Sweep · hurdle × basis window</h3>
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">net ₹ heat table over one recorded day — pick settings by evidence</div>
+        </div>
+        <button data-testid="sweep-run-btn" onClick={() => onRun({ date, hurdles: parse(hurdles), basis_windows: parse(windows).map(Math.round) })} disabled={running || !date} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold uppercase tracking-widest transition-colors duration-150 disabled:opacity-50">{running ? <><RefreshCw className="h-3.5 w-3.5 animate-spin"/> Sweeping…</> : <><Play className="h-3.5 w-3.5"/> Run sweep</>}</button>
+      </div>
+      <div className="grid md:grid-cols-3 gap-3 text-xs">
+        <label className="block"><span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Recorded day</span>
+          <select data-testid="sweep-date-select" value={date} onChange={(e) => setDate(e.target.value)} className="mt-1 w-full bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-xs">{(sessions || []).map((s) => <option key={s.date} value={s.date}>{s.date}</option>)}</select></label>
+        <label className="block"><span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Hurdles % (comma)</span><input data-testid="sweep-hurdles-input" value={hurdles} onChange={(e) => setHurdles(e.target.value)} className="mt-1 w-full bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-xs" /></label>
+        <label className="block"><span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Basis windows s (comma)</span><input data-testid="sweep-windows-input" value={windows} onChange={(e) => setWindows(e.target.value)} className="mt-1 w-full bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-xs" /></label>
+      </div>
+      {r?.error && <div data-testid="sweep-error" className="mt-3 text-[11px] font-mono text-rose-300">✗ {r.error}</div>}
+      {r && !r.error && (
+        <div className="mt-4">
+          {r.best && <div data-testid="sweep-best" className="mb-3 text-xs font-mono text-emerald-300">★ Best: hurdle <b>{r.best.hurdle_pct}%</b> · window <b>{r.best.basis_window_s}s</b> → {fmtINR(r.best.net_pnl_inr)} over {r.best.trades} trades ({r.best.win_rate}% win, DD {r.best.max_drawdown_pct}%) · {r.lines.toLocaleString()} ticks</div>}
+          <div className="overflow-x-auto rounded border border-[#1E2638]">
+            <table data-testid="sweep-heat-table" className="w-full text-xs font-mono">
+              <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-[#1E2638]"><tr><th className="text-left px-3 py-2">hurdle ↓ / window →</th>{ws.map((w) => <th key={w} className="text-right px-3 py-2">{w}s</th>)}</tr></thead>
+              <tbody>{hs.map((h) => <tr key={h} className="border-b border-[#1E2638]/60"><td className="px-3 py-2 font-bold text-slate-200">{h}%</td>{ws.map((w) => { const g = cell(h, w); if (!g) return <td key={w}/>; const a = Math.abs(g.net_pnl_inr) / maxAbs; const bg = g.net_pnl_inr >= 0 ? `rgba(16,185,129,${0.12 + 0.6 * a})` : `rgba(239,68,68,${0.12 + 0.6 * a})`; const best = r.best && r.best.hurdle_pct === h && r.best.basis_window_s === w; return <td key={w} data-testid={`sweep-cell-${h}-${w}`} title={`${g.trades} trades · ${g.win_rate}% win · DD ${g.max_drawdown_pct}%`} className={`px-3 py-2 text-right ${best ? "ring-1 ring-inset ring-amber-400" : ""}`} style={{backgroundColor: bg}}><div className="font-bold text-slate-100">{g.net_pnl_inr >= 0 ? "+" : ""}{g.net_pnl_inr.toFixed(2)}</div><div className="text-[10px] text-slate-300">{g.trades} tr · {g.win_rate}%</div></td>; })}</tr>)}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ScreenerPanel({ result, onRun, onApply, running, applyResult, openCount }) {
+  const [sel, setSel] = useState(null);
+  const rows = result?.rows || [];
+  const chosen = sel ?? (result?.recommended || []);
+  const toggle = (c) => setSel(chosen.includes(c) ? chosen.filter((x) => x !== c) : [...chosen, c]);
+  return (
+    <section data-testid="coin-screener-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <h3 className="font-semibold text-slate-200 inline-flex items-center gap-2" style={{fontFamily:"Outfit, sans-serif"}}><Target className="h-4 w-4 text-emerald-400"/> Coin Screener</h3>
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">score = 0.6 × log-volume rank (CoinDCX futures 24h) + 0.4 × lag activity (p95 |divergence| vs hurdle from today's ticks){result ? ` · ${result.candidates} candidates · lag data for ${result.lag_data_coins}` : ""}</div>
+        </div>
+        <div className="flex gap-2">
+          <button data-testid="screener-run-btn" onClick={onRun} disabled={running} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold uppercase tracking-widest transition-colors duration-150 disabled:opacity-50">{running ? <RefreshCw className="h-3.5 w-3.5 animate-spin"/> : <Radio className="h-3.5 w-3.5"/>} Screen now</button>
+          <button data-testid="screener-apply-btn" onClick={() => onApply(chosen)} disabled={!result || !chosen.length || openCount > 0} title={openCount > 0 ? "close open positions first" : ""} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-cyan-500 hover:bg-cyan-400 text-slate-900 text-xs font-bold uppercase tracking-widest transition-colors duration-150 disabled:opacity-50">Apply universe ({chosen.length})</button>
+        </div>
+      </div>
+      {applyResult && <div data-testid="screener-apply-result" className={`mb-3 text-[11px] font-mono ${applyResult.ok ? "text-emerald-300" : "text-rose-300"}`}>{applyResult.ok ? `✓ Universe now: ${applyResult.coins.join(", ")} (feeds restarted)` : `✗ ${applyResult.error}`}</div>}
+      {result && (
+        <div className="mb-3 flex flex-wrap gap-2 text-[10px] font-mono">
+          {result.add?.length > 0 && <span data-testid="screener-add-badge" className="px-2 py-0.5 rounded-full border border-emerald-800 bg-emerald-950/30 text-emerald-300">+ {result.add.join(", ")}</span>}
+          {result.drop?.length > 0 && <span data-testid="screener-drop-badge" className="px-2 py-0.5 rounded-full border border-rose-800 bg-rose-950/30 text-rose-300">− {result.drop.join(", ")}</span>}
+          <span className="px-2 py-0.5 rounded-full border border-[#1E2638] text-slate-400">Binance list: {result.binance_source} · min vol ${(result.min_volume_usdt / 1e6).toFixed(0)}M · CoinSwitch listing assumed for majors</span>
+        </div>
+      )}
+      {rows.length > 0 ? (
+        <div className="overflow-x-auto rounded border border-[#1E2638] max-h-80 overflow-y-auto">
+          <table data-testid="screener-table" className="w-full text-xs font-mono">
+            <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-[#1E2638] sticky top-0 bg-[#121721]"><tr><th className="px-3 py-2 text-left">Pick</th><th className="px-3 py-2 text-left">#</th><th className="px-3 py-2 text-left">Coin</th><th className="px-3 py-2 text-right">24h vol $M</th><th className="px-3 py-2 text-right">lag p95 bps</th><th className="px-3 py-2 text-right">lag score</th><th className="px-3 py-2 text-right">vol score</th><th className="px-3 py-2 text-right">score</th></tr></thead>
+            <tbody>{rows.slice(0, 30).map((x, i) => <tr key={x.coin} data-testid={`screener-row-${x.coin}`} className={`border-b border-[#1E2638]/60 ${chosen.includes(x.coin) ? "bg-emerald-950/20" : ""}`}><td className="px-3 py-1.5"><input data-testid={`screener-pick-${x.coin}`} type="checkbox" checked={chosen.includes(x.coin)} onChange={() => toggle(x.coin)} className="h-3.5 w-3.5 accent-emerald-500"/></td><td className="px-3 py-1.5 text-slate-500">{i + 1}</td><td className="px-3 py-1.5 font-bold text-slate-200">{x.coin}{x.tracked && <span className="ml-1 text-[9px] text-cyan-400">●</span>}</td><td className="px-3 py-1.5 text-right">{(x.volume_24h_usdt / 1e6).toFixed(0)}</td><td className="px-3 py-1.5 text-right text-purple-300">{x.lag_p95_dev_bps ?? "—"}</td><td className="px-3 py-1.5 text-right">{x.lag_score ?? "—"}</td><td className="px-3 py-1.5 text-right">{x.volume_score}</td><td className="px-3 py-1.5 text-right font-bold text-emerald-300">{x.score}</td></tr>)}</tbody>
+          </table>
+        </div>
+      ) : <div className="text-[11px] font-mono text-slate-500">Click "Screen now" to rank the CoinDCX/Binance futures universe. ● = currently tracked. Applying a new universe restarts the feeds and requires no open positions.</div>}
+    </section>
+  );
+}
+
 const EX_ORDER = ["binance", "coinswitch", "coindcx"];
 
 function AccountPanel({ status, onApply, result }) {
@@ -585,6 +663,27 @@ function Dashboard() {
     setReplayRunning(false);
   };
   const [dcxCheck, setDcxCheck] = useState(null);
+  const [sweep, setSweep] = useState(null);
+  const [sweepRunning, setSweepRunning] = useState(false);
+  const runSweep = async (body) => {
+    setSweepRunning(true);
+    try { const r = await axios.post(`${API}/replay/sweep`, body); setSweep(r.data); }
+    catch (e) { setSweep({ error: e.response?.data?.detail || e.message }); }
+    setSweepRunning(false);
+  };
+  const [screenRes, setScreenRes] = useState(null);
+  const [screening, setScreening] = useState(false);
+  const [applyUniverse, setApplyUniverse] = useState(null);
+  const runScreener = async () => {
+    setScreening(true);
+    try { const r = await axios.get(`${API}/screener?top_n=${status?.num_slots || 10}`); setScreenRes(r.data); setApplyUniverse(null); }
+    catch (e) { setScreenRes({ rows: [], error: e.response?.data?.detail || e.message }); }
+    setScreening(false);
+  };
+  const applyUniverseCoins = async (coins) => {
+    try { const r = await axios.post(`${API}/universe`, { coins }); setApplyUniverse({ ok: true, coins: r.data.coins }); pull(); }
+    catch (e) { setApplyUniverse({ ok: false, error: e.response?.data?.detail || e.message }); }
+  };
   const runDcxCheck = async () => {
     setDcxCheck({ loading: true });
     try { const r = await axios.post(`${API}/coindcx/check`); setDcxCheck({ ok: true, data: r.data }); }
@@ -926,6 +1025,10 @@ function Dashboard() {
         <BenchmarkPanel bench={bench} verdict={verdict} onRun={runBenchmark} running={!!bench?.running} duration={benchDuration} setDuration={setBenchDuration} fees={fees} setFees={setFees} />
 
         <ReplayPanel sessions={sessions} recorder={recorder} config={config} status={status} onRun={runReplay} result={replay} running={replayRunning} />
+
+        <SweepPanel sessions={sessions} onRun={runSweep} result={sweep} running={sweepRunning} />
+
+        <ScreenerPanel result={screenRes} onRun={runScreener} onApply={applyUniverseCoins} running={screening} applyResult={applyUniverse} openCount={open.length} />
 
         <footer className="pt-4 pb-8 text-center text-[10px] uppercase tracking-widest text-slate-600 font-mono">
           QuantLag HFT · Binance Futures leader → CoinSwitch PRO laggard · {status?.mode || "…"} mode

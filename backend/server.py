@@ -12,7 +12,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,7 +26,8 @@ from starlette.middleware.cors import CORSMiddleware
 
 from bot_engine import BotConfig, BotEngine
 from coindcx_client import CoinDCXError
-from replay import replay_session
+from replay import replay_session, replay_sweep
+from screener import screen
 from verdict import evaluate as evaluate_verdict
 
 ROOT_DIR = Path(__file__).parent
@@ -243,6 +244,78 @@ async def replay_run(body: ReplayRequest):
 @api.get("/replay/last")
 async def replay_last():
     return REPLAY
+
+
+class SweepRequest(BaseModel):
+    date: str
+    hurdles: List[float] = Field(default_factory=lambda: [0.05, 0.08, 0.10, 0.12, 0.15, 0.20])
+    basis_windows: List[int] = Field(default_factory=lambda: [60, 180, 300, 600])
+    leverage: Optional[int] = Field(default=None, ge=1, le=100)
+    num_slots: Optional[int] = Field(default=None, ge=1, le=50)
+    basis_filter: bool = True
+
+
+@api.post("/replay/sweep")
+async def replay_sweep_run(body: SweepRequest):
+    if REPLAY["running"]:
+        raise HTTPException(status_code=409, detail="replay already running")
+    if not (1 <= len(body.hurdles) <= 12 and 1 <= len(body.basis_windows) <= 8):
+        raise HTTPException(status_code=400, detail="grid too large (max 12 hurdles × 8 windows)")
+    if any(h <= 0 or h > 10 for h in body.hurdles) or any(w < 30 or w > 3600 for w in body.basis_windows):
+        raise HTTPException(status_code=422, detail="hurdles in (0,10], windows in [30,3600]")
+    path = ENGINE.recorder.root / f"{body.date}.jsonl"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"no recording for {body.date}")
+    c = ENGINE.cfg
+    REPLAY.update({"running": True, "error": None})
+    try:
+        await asyncio.to_thread(ENGINE.recorder._flush)
+        res = await asyncio.to_thread(
+            replay_sweep, path, hurdles=body.hurdles, basis_windows=body.basis_windows, coins=c.coins,
+            basis_filter=body.basis_filter, leverage=body.leverage or c.leverage, num_slots=body.num_slots or c.num_slots,
+            equity_inr=c.starting_capital_inr, timeout_seconds=c.timeout_seconds, stop_loss_pct=c.stop_loss_pct,
+            fee_round_trip_pct=c.entry_taker_fee_pct + c.exit_taker_fee_pct)
+        REPLAY["sweep"] = res
+        b = res["best"]
+        if b: await ENGINE.store.log("INFO", f"Sweep {body.date}: best hurdle {b['hurdle_pct']}% / window {b['basis_window_s']}s → ₹{b['net_pnl_inr']:+.2f} ({b['trades']} trades)")
+        return res
+    except Exception as e:
+        REPLAY["error"] = str(e)
+        raise HTTPException(status_code=500, detail=f"sweep failed: {e}")
+    finally:
+        REPLAY["running"] = False
+
+
+# ------------------------- Screener / universe --------------------------------
+SCREEN: Dict[str, Any] = {"result": None}
+
+
+@api.get("/screener")
+async def screener_run(top_n: int = 10, min_volume_usdt: float = 5e6):
+    tick_file = ENGINE.recorder.root / (datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d") + ".jsonl")
+    try:
+        res = await screen(current=ENGINE.cfg.coins, top_n=max(1, min(top_n, 30)), tick_file=tick_file,
+                           hurdle_bps=ENGINE.hurdle_pct() * 100.0, min_volume_usdt=min_volume_usdt)
+    except Exception as e:
+        raise HTTPException(status_code=424, detail=f"screener data fetch failed: {e}")
+    res["current"] = ENGINE.cfg.coins
+    SCREEN["result"] = res
+    return res
+
+
+class UniverseUpdate(BaseModel):
+    coins: List[str] = Field(min_length=1, max_length=30)
+
+
+@api.post("/universe")
+async def universe_apply(body: UniverseUpdate):
+    try:
+        await ENGINE.set_coins(body.coins)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"ok": True, "coins": ENGINE.cfg.coins, "running": ENGINE.running}
 
 
 @api.get("/analytics/coins")

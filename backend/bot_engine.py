@@ -179,15 +179,46 @@ class Position:
 # In-memory store (fine for dashboard preview; standalone bot swaps in SQLite)
 # ---------------------------------------------------------------------------
 class MemoryStore:
-    def __init__(self) -> None:
+    def __init__(self, persist_path: Optional[Path] = None) -> None:
         self.open: Dict[str, Position] = {}
         self.closed: List[Position] = []
         self.equity_curve: List[Dict[str, float]] = []
         self.event_log: List[Dict[str, Any]] = []
+        self._path = persist_path
+        self._eq_pushes = 0
+        if persist_path: self._load()
+
+    # --- persistence (web dashboard; CLI uses SQLiteStore) --------------------
+    def _load(self) -> None:
+        try:
+            d = json.loads(self._path.read_text())
+            self.closed = [Position(**p) for p in d.get("closed", [])]
+            self.open = {p["coin"]: Position(**p) for p in d.get("open", [])}
+            self.equity_curve = d.get("equity_curve", [])
+            logger.info(f"Restored {len(self.closed)} closed / {len(self.open)} open trades from {self._path.name}")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"trade history load failed: {e}")
+
+    def _save(self, with_equity: bool = True) -> None:
+        if not self._path: return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            prev = {}
+            if not with_equity and self._path.exists():
+                try: prev = json.loads(self._path.read_text())
+                except Exception: prev = {}
+            data = {"open": [asdict(p) for p in self.open.values()], "closed": [asdict(p) for p in self.closed],
+                    "equity_curve": self.equity_curve if with_equity else prev.get("equity_curve", self.equity_curve)}
+            tmp = self._path.with_suffix(".tmp"); tmp.write_text(json.dumps(data)); tmp.replace(self._path)
+        except Exception as e:
+            logger.warning(f"trade history save failed: {e}")
 
     # --- open positions ------------------------------------------------------
     async def add_open(self, p: Position) -> None:
         self.open[p.coin] = p
+        self._save()
 
     async def get_open(self, coin: str) -> Optional[Position]:
         return self.open.get(coin)
@@ -200,6 +231,7 @@ class MemoryStore:
         self.closed.append(p)
         if len(self.closed) > 2000:
             self.closed = self.closed[-2000:]
+        self._save()
 
     async def all_closed(self, limit: int = 500) -> List[Position]:
         return list(reversed(self.closed[-limit:]))
@@ -209,6 +241,8 @@ class MemoryStore:
         self.equity_curve.append({"ts": ts, "equity": equity})
         if len(self.equity_curve) > 5000:
             self.equity_curve = self.equity_curve[-5000:]
+        self._eq_pushes += 1
+        if self._eq_pushes % 12 == 0: self._save()
 
     async def get_equity_curve(self) -> List[Dict[str, float]]:
         return list(self.equity_curve)
@@ -762,14 +796,10 @@ class TelegramReporter:
 class BotEngine:
     def __init__(self, cfg: BotConfig, store: Optional[MemoryStore] = None) -> None:
         self.cfg = cfg
-        self.store = store or MemoryStore()
+        self.data_dir = Path(cfg.data_dir) if cfg.data_dir else Path(__file__).resolve().parent.parent / "data"
+        self.store = store or MemoryStore(persist_path=self.data_dir / "trades.json")
         self.fx = FXRateService(cfg.fx_usdt_inr)
-        self.simulator = MarketSimulator(cfg.coins, fx_provider=lambda: self.fx.rate, fx_ref=cfg.fx_usdt_inr) if cfg.simulate else None
-        self.live_feed = None if cfg.simulate else LiveBinanceFeed(cfg.coins)
-        # Public laggard book WS — no keys needed, powers PAPER + LIVE when not simulating
-        FeedCls = LiveCoinDCXBookFeed if cfg.laggard_exchange == "coindcx" else LiveCoinSwitchBookFeed
-        self.coinswitch_feed: Optional[LiveCoinSwitchBookFeed] = None if cfg.simulate else \
-            FeedCls(cfg.coins, lambda: self.fx.rate, url=cfg.coinswitch_ws_url if cfg.laggard_exchange == "coinswitch" else "")
+        self._build_feeds()
         self.telegram = TelegramReporter(cfg.telegram_bot_token, cfg.telegram_chat_id)
         self.coindcx: Optional[CoinDCXFuturesClient] = None
         if cfg.coindcx_api_key and cfg.coindcx_api_secret:
@@ -778,7 +808,6 @@ class BotEngine:
             except Exception as e:
                 logger.warning(f"CoinDCX client init failed: {e}")
         self._basis_samples: Dict[str, List[tuple]] = {c: [] for c in cfg.coins}
-        self.data_dir = Path(cfg.data_dir) if cfg.data_dir else Path(__file__).resolve().parent.parent / "data"
         self.settings_path = self.data_dir / "settings.json"
         self.recorder = TickRecorder(self.data_dir / "ticks", cfg.tick_retention_days, enabled=cfg.record_ticks and not cfg.simulate)
         self._restored_settings: Dict[str, Any] = {}
@@ -822,12 +851,48 @@ class BotEngine:
         self._restored_settings = apply_settings(self, load_settings(self.settings_path))
         if self._restored_settings:
             logger.info(f"Restored persisted settings: {self._restored_settings}")
+            restored_coins = self._restored_settings.get("coins")
+            if restored_coins and list(restored_coins) != list(self._sparkline.keys()):
+                self._reset_universe(list(restored_coins))
 
     def persist(self) -> None:
         try:
             save_settings(self, self.settings_path)
         except Exception as e:
             logger.warning(f"settings persist failed: {e}")
+
+    def _build_feeds(self) -> None:
+        cfg = self.cfg
+        self.simulator = MarketSimulator(cfg.coins, fx_provider=lambda: self.fx.rate, fx_ref=cfg.fx_usdt_inr) if cfg.simulate else None
+        self.live_feed = None if cfg.simulate else LiveBinanceFeed(cfg.coins)
+        # Public laggard book WS — no keys needed, powers PAPER + LIVE when not simulating
+        FeedCls = LiveCoinDCXBookFeed if cfg.laggard_exchange == "coindcx" else LiveCoinSwitchBookFeed
+        self.coinswitch_feed: Optional[LiveCoinSwitchBookFeed] = None if cfg.simulate else \
+            FeedCls(cfg.coins, lambda: self.fx.rate, url=cfg.coinswitch_ws_url if cfg.laggard_exchange == "coinswitch" else "")
+
+    def _reset_universe(self, coins: List[str]) -> None:
+        self.cfg.coins = coins
+        for name in ("_last_spread_pct", "_last_gross_pct", "_last_basis_pct"):
+            setattr(self, name, {c: 0.0 for c in coins})
+        self._last_signal_state = {c: "WAITING" for c in coins}
+        self._sparkline = {c: [] for c in coins}
+        self._heat = {c: {} for c in coins}
+        self._basis_samples = {c: [] for c in coins}
+        self.paused = {c for c in self.paused if c in coins}
+        self._build_feeds()
+        if self.coinswitch_poller: self.coinswitch_poller.coins = coins
+
+    async def set_coins(self, coins: List[str]) -> None:
+        """Swap the traded universe: restarts feeds; refuses while positions are open."""
+        coins = [c.upper() for c in dict.fromkeys(coins) if c]
+        if not coins: raise ValueError("empty universe")
+        if await self.store.all_open(): raise RuntimeError("close open positions before changing the universe")
+        was_running = self.running
+        if was_running: await self.stop()
+        self._reset_universe(coins)
+        self.persist()
+        await self.store.log("INFO", f"Universe set to {len(coins)} coins: {', '.join(coins)}")
+        if was_running: await self.start()
 
     # --- lifecycle -----------------------------------------------------------
     async def start(self) -> None:

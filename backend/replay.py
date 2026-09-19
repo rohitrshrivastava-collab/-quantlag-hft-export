@@ -85,11 +85,21 @@ class TickRecorder:
                 "retention_days": self.retention_days, "sessions": self.sessions()[:10]}
 
 
+def iter_ticks(path: Path, max_lines: int = 5_000_000):
+    with open(path) as fh:
+        for i, line in enumerate(fh):
+            if i >= max_lines: break
+            try: r = json.loads(line)
+            except ValueError: continue
+            yield r
+
+
 def replay_session(path: Path, *, coins: List[str], hurdle_pct: float, basis_filter: bool, basis_window_s: int,
                    leverage: int, num_slots: int, equity_inr: float, timeout_seconds: int, stop_loss_pct: float,
                    fee_round_trip_pct: float, start_ts: Optional[float] = None, end_ts: Optional[float] = None,
-                   max_lines: int = 5_000_000) -> Dict[str, Any]:
-    """Offline pass of the live signal rules over one recorded day. Fills at top-of-book like PAPER mode."""
+                   max_lines: int = 5_000_000, rows=None) -> Dict[str, Any]:
+    """Offline pass of the live signal rules over one recorded day. Fills at top-of-book like PAPER mode.
+    `rows` (pre-loaded tick dicts) can be passed to avoid re-reading the file (used by sweeps)."""
     basis_hist: Dict[str, List[tuple]] = {c: [] for c in coins}
     open_pos: Dict[str, Dict[str, Any]] = {}
     trades: List[Dict[str, Any]] = []
@@ -119,12 +129,10 @@ def replay_session(path: Path, *, coins: List[str], hurdle_pct: float, basis_fil
                        "entry": p["entry"], "exit": px, "gross": round(gross, 4), "fees": round(fees, 4), "net": round(net, 4),
                        "reason": reason, "basis_pct": round(p["basis"], 4)})
 
-    with open(path) as fh:
-        for line in fh:
+    source = rows if rows is not None else iter_ticks(path, max_lines)
+    if True:
+        for r in source:
             n += 1
-            if n > max_lines: break
-            try: r = json.loads(line)
-            except ValueError: continue
             t, coin = r["t"], r["c"]
             if coin not in basis_hist: continue
             if start_ts and t < start_ts: continue
@@ -183,3 +191,18 @@ def _max_dd(curve: List[Dict[str, float]]) -> float:
         e = p["equity"]; peak = e if peak is None else max(peak, e)
         if peak: dd = max(dd, (peak - e) / peak * 100)
     return round(dd, 3)
+
+
+def replay_sweep(path: Path, *, hurdles: List[float], basis_windows: List[int], max_lines: int = 1_500_000,
+                 **params) -> Dict[str, Any]:
+    """Grid of hurdle × basis-window replays over one pre-loaded day."""
+    rows = list(iter_ticks(path, max_lines))
+    grid = []
+    for h in hurdles:
+        for w in basis_windows:
+            r = replay_session(path, rows=rows, hurdle_pct=h, basis_window_s=w, **params)
+            grid.append({"hurdle_pct": h, "basis_window_s": w, "trades": r["trades"], "win_rate": r["win_rate"],
+                         "net_pnl_inr": r["net_pnl_inr"], "return_pct": r["return_pct"], "max_drawdown_pct": r["max_drawdown_pct"]})
+    best = max(grid, key=lambda g: (g["net_pnl_inr"], -g["max_drawdown_pct"])) if grid else None
+    return {"file": path.name, "lines": len(rows), "hurdles": hurdles, "basis_windows": basis_windows,
+            "params": {k: v for k, v in params.items() if k != "coins"}, "grid": grid, "best": best}
