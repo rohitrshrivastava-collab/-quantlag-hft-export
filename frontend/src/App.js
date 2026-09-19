@@ -165,6 +165,69 @@ function HurdleTuner({ draftHurdle, sim }) {
   );
 }
 
+function ReplayPanel({ sessions, recorder, config, status, onRun, result, running }) {
+  const [p, setP] = useState({ date: "", hurdle_pct: "", leverage: "", num_slots: "", timeout_seconds: "", stop_loss_pct: "", basis_filter: true });
+  useEffect(() => { if (!p.date && sessions?.length) setP((x) => ({ ...x, date: sessions[0].date })); }, [sessions, p.date]);
+  useEffect(() => {
+    if (config && p.hurdle_pct === "") setP((x) => ({ ...x, hurdle_pct: String(config.hurdle_pct ?? ""), leverage: String(config.leverage ?? 1), num_slots: String(status?.num_slots ?? 10), timeout_seconds: String(config.timeout_seconds ?? 45), stop_loss_pct: String(config.stop_loss_pct ?? 0.35), basis_filter: !!config.basis_filter }));
+    // eslint-disable-next-line
+  }, [config?.hurdle_pct]);
+  const num = (k, label, tid, step) => (
+    <label className="block"><span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">{label}</span>
+      <input data-testid={tid} type="number" step={step} value={p[k]} onChange={(e) => setP({ ...p, [k]: e.target.value })} className="mt-1 w-full bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-xs focus:outline-none focus:border-cyan-600" /></label>
+  );
+  const r = result;
+  return (
+    <section data-testid="session-replay-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <h3 className="font-semibold text-slate-200 inline-flex items-center gap-2" style={{fontFamily:"Outfit, sans-serif"}}><RefreshCw className="h-4 w-4 text-purple-400"/> Session Replay</h3>
+          <div data-testid="recorder-status-text" className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">recorder {recorder?.enabled ? "ON" : "OFF"} · {recorder?.lines_written?.toLocaleString?.() ?? 0} ticks this run · {sessions?.length ?? 0} day file(s) · keep {recorder?.retention_days ?? 7} d</div>
+        </div>
+        <button data-testid="replay-run-btn" onClick={() => onRun({ date: p.date, hurdle_pct: Number(p.hurdle_pct) || undefined, leverage: Number(p.leverage) || undefined, num_slots: Number(p.num_slots) || undefined, timeout_seconds: Number(p.timeout_seconds) || undefined, stop_loss_pct: Number(p.stop_loss_pct) || undefined, basis_filter: p.basis_filter })} disabled={running || !p.date} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold uppercase tracking-widest transition-colors duration-150 disabled:opacity-50">{running ? <><RefreshCw className="h-3.5 w-3.5 animate-spin"/> Replaying…</> : <><Play className="h-3.5 w-3.5"/> Replay day</>}</button>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3 text-xs">
+        <label className="block"><span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Recorded day</span>
+          <select data-testid="replay-date-select" value={p.date} onChange={(e) => setP({ ...p, date: e.target.value })} className="mt-1 w-full bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-xs">
+            {(sessions || []).map((s) => <option key={s.date} value={s.date}>{s.date} · {s.size_mb} MB</option>)}
+          </select></label>
+        {num("hurdle_pct", "Hurdle %", "replay-hurdle-input", "0.005")}
+        {num("leverage", "Leverage", "replay-leverage-input", "1")}
+        {num("num_slots", "Slots", "replay-slots-input", "1")}
+        {num("timeout_seconds", "Timeout s", "replay-timeout-input", "1")}
+        {num("stop_loss_pct", "Stop %", "replay-stop-input", "0.01")}
+        <label className="block"><span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Basis filter</span>
+          <div className="mt-1 h-[30px] flex items-center"><input data-testid="replay-basis-checkbox" type="checkbox" checked={p.basis_filter} onChange={(e) => setP({ ...p, basis_filter: e.target.checked })} className="h-4 w-4 accent-purple-500" /></div></label>
+      </div>
+      {r?.error && <div data-testid="replay-error" className="mt-3 text-[11px] font-mono text-rose-300">✗ {r.error}</div>}
+      {r && !r.error && (
+        <div data-testid="replay-result" className="mt-4 grid lg:grid-cols-3 gap-4">
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              {[["Trades", r.trades, ""], ["Win rate", `${r.win_rate}%`, ""], ["Net PnL", fmtINR(r.net_pnl_inr), r.net_pnl_inr >= 0 ? "text-emerald-300" : "text-rose-300"], ["Return", `${r.return_pct}%`, r.return_pct >= 0 ? "text-emerald-300" : "text-rose-300"], ["Max DD", `${r.max_drawdown_pct}%`, "text-amber-300"], ["Span", `${Math.round(r.span_s / 60)} min`, ""]].map(([k, v, cls]) => (
+                <div key={k} className="rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2"><div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">{k}</div><div data-testid={`replay-metric-${k.toLowerCase().replace(/\s/g, "-")}`} className={`font-mono text-lg font-bold ${cls || "text-slate-200"}`}>{v}</div></div>
+              ))}
+            </div>
+            <div className="text-[10px] font-mono text-slate-500">{r.file} · {r.lines.toLocaleString()} ticks · hurdle {r.params.hurdle_pct}% · {r.params.leverage}x · {r.params.num_slots} slots · basis {r.params.basis_filter ? "on" : "off"}</div>
+          </div>
+          <div className="lg:col-span-2 min-w-0">
+            <EquityCurveChart points={r.equity_curve} start={r.params.equity_inr} />
+            {r.per_coin.length > 0 && (
+              <div className="mt-3 overflow-x-auto rounded border border-[#1E2638]">
+                <table data-testid="replay-per-coin-table" className="w-full text-xs font-mono">
+                  <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-[#1E2638]"><tr><th className="text-left px-3 py-1.5">Coin</th><th className="text-right px-3 py-1.5">Trades</th><th className="text-right px-3 py-1.5">Wins</th><th className="text-right px-3 py-1.5">Net ₹</th><th className="text-right px-3 py-1.5">Timeouts</th><th className="text-right px-3 py-1.5">Avg hold</th></tr></thead>
+                  <tbody>{r.per_coin.map((c) => <tr key={c.coin} className="border-b border-[#1E2638]/60"><td className="px-3 py-1.5 font-bold text-slate-200">{c.coin}</td><td className="px-3 py-1.5 text-right">{c.trades}</td><td className="px-3 py-1.5 text-right">{c.wins}</td><td className={`px-3 py-1.5 text-right font-bold ${c.net >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{c.net.toFixed(2)}</td><td className="px-3 py-1.5 text-right">{c.timeouts}</td><td className="px-3 py-1.5 text-right">{c.avg_hold_s}s</td></tr>)}</tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+      {!r && <div className="mt-3 text-[11px] font-mono text-slate-500">Ticks are recorded to data/ticks/YYYY-MM-DD.jsonl while the bot runs on real feeds. Pick a day, change hurdle/basis/leverage and replay to see what the engine would have done.</div>}
+    </section>
+  );
+}
+
 const EX_ORDER = ["binance", "coinswitch", "coindcx"];
 
 function AccountPanel({ status, onApply, result }) {
@@ -507,6 +570,26 @@ function Dashboard() {
   };
   const [coinFilter, setCoinFilter] = useState("");
   const [analytics, setAnalytics] = useState([]);
+  const [sessions, setSessions] = useState([]);
+  const [recorder, setRecorder] = useState(null);
+  const [replay, setReplay] = useState(null);
+  const [replayRunning, setReplayRunning] = useState(false);
+  useEffect(() => {
+    const go = async () => { try { const r = await axios.get(`${API}/replay/sessions`); setSessions(r.data.items || []); setRecorder(r.data.recorder); } catch (e) {} };
+    go(); const id = setInterval(go, 10000); return () => clearInterval(id);
+  }, []);
+  const runReplay = async (body) => {
+    setReplayRunning(true);
+    try { const r = await axios.post(`${API}/replay/run`, body); setReplay(r.data); }
+    catch (e) { setReplay({ error: e.response?.data?.detail || e.message }); }
+    setReplayRunning(false);
+  };
+  const [dcxCheck, setDcxCheck] = useState(null);
+  const runDcxCheck = async () => {
+    setDcxCheck({ loading: true });
+    try { const r = await axios.post(`${API}/coindcx/check`); setDcxCheck({ ok: true, data: r.data }); }
+    catch (e) { setDcxCheck({ ok: false, error: e.response?.data?.detail || e.message }); }
+  };
   const [accountResult, setAccountResult] = useState(null);
   const [digestResult, setDigestResult] = useState(null);
   useEffect(() => {
@@ -807,6 +890,20 @@ function Dashboard() {
                   {liveCheck.loading ? "Calling wallet_balance…" : liveCheck.ok ? "✓ CoinSwitch API reachable · keys valid" : `✗ ${liveCheck.error}`}
                 </div>
               )}
+              <div className="mt-3 flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">CoinDCX (Pair B) · {config?.coindcx_client_ready ? "keys loaded" : "no keys"}</span>
+                <button data-testid="coindcx-check-btn" onClick={runDcxCheck} disabled={dcxCheck?.loading} className="px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest bg-slate-800 hover:bg-slate-700 text-slate-100 transition-colors duration-150 disabled:opacity-40">Check CoinDCX</button>
+              </div>
+              {dcxCheck && (
+                <div data-testid="coindcx-check-result" className={`mt-2 text-[11px] font-mono rounded border px-2 py-1.5 break-words ${dcxCheck.loading ? "border-slate-700 text-slate-400" : dcxCheck.ok ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>
+                  {dcxCheck.loading ? "Calling futures wallets…" : dcxCheck.ok ? "✓ CoinDCX Futures API reachable · keys valid" : `✗ ${dcxCheck.error}`}
+                </div>
+              )}
+              {telemetry?.feed?.fx && (
+                <div data-testid="fx-sources-row" className="mt-3 text-[10px] font-mono text-slate-500">
+                  <span className="uppercase tracking-widest">USDT/INR blend</span> <span className="text-slate-200">₹{telemetry.feed.fx.rate}</span> = median of {Object.entries(telemetry.feed.fx.sources).map(([k, v]) => <span key={k} data-testid={`fx-source-${k}`} className={`ml-1.5 px-1.5 py-0.5 rounded border ${v.rate && telemetry.feed.fx.used.includes(k) ? "border-[#1E2638] text-slate-300" : "border-rose-900 text-rose-400"}`}>{k} {v.rate ?? "—"}</span>)}
+                </div>
+              )}
             </div>
             <TelegramPanel tg={telemetry?.telegram} result={tgResult} onTest={() => sendTelegram("test")} onSummary={() => sendTelegram("summary")} />
           </div>
@@ -827,6 +924,8 @@ function Dashboard() {
         </section>
 
         <BenchmarkPanel bench={bench} verdict={verdict} onRun={runBenchmark} running={!!bench?.running} duration={benchDuration} setDuration={setBenchDuration} fees={fees} setFees={setFees} />
+
+        <ReplayPanel sessions={sessions} recorder={recorder} config={config} status={status} onRun={runReplay} result={replay} running={replayRunning} />
 
         <footer className="pt-4 pb-8 text-center text-[10px] uppercase tracking-widest text-slate-600 font-mono">
           QuantLag HFT · Binance Futures leader → CoinSwitch PRO laggard · {status?.mode || "…"} mode

@@ -84,3 +84,4 @@ android-sdk/
 # overlay black-box crash/user-report dumps — session data, never history
 **/.emergent/recordings/
 benchmark/last_result.json
+data/

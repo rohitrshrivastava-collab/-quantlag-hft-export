@@ -25,6 +25,8 @@ from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 from bot_engine import BotConfig, BotEngine
+from coindcx_client import CoinDCXError
+from replay import replay_session
 from verdict import evaluate as evaluate_verdict
 
 ROOT_DIR = Path(__file__).parent
@@ -111,6 +113,7 @@ async def bot_stop():
 @api.post("/bot/mode")
 async def bot_mode(body: ModeUpdate):
     ENGINE.cfg.paper_trading = body.paper_trading
+    ENGINE.persist()
     mode = "PAPER" if body.paper_trading else "LIVE"
     warning = None
     if not body.paper_trading and not ENGINE._live_executor_ready():
@@ -164,7 +167,82 @@ async def update_account(body: AccountUpdate):
     if body.leverage is not None:
         errors = await ENGINE.apply_leverage(body.leverage)
         changes["leverage"] = body.leverage
+    ENGINE.persist()
     return {"ok": True, "changes": changes, "leverage_errors": errors, "status": ENGINE.snapshot()}
+
+
+@api.post("/coindcx/check")
+async def coindcx_check():
+    """Preflight: validates CoinDCX keys via futures wallet + positions."""
+    if ENGINE.coindcx is None:
+        raise HTTPException(status_code=400, detail="CoinDCX keys not configured — set COINDCX_API_KEY/SECRET in backend/.env and restart")
+    try:
+        wallets = await ENGINE.coindcx.wallet_balance()
+        positions = await ENGINE.coindcx.positions()
+    except CoinDCXError as e:
+        hint = " (401 = key/secret rejected: check IP whitelist, Futures permission, or re-copy the secret)" if e.status == 401 else ""
+        raise HTTPException(status_code=424, detail=f"CoinDCX API {e.status}: {e.body}{hint}")
+    except Exception as e:
+        raise HTTPException(status_code=424, detail=f"CoinDCX unreachable: {e}")
+    await ENGINE.store.log("INFO", "CoinDCX preflight OK — wallet reachable")
+    return {"ok": True, "wallets": wallets, "positions": positions if isinstance(positions, list) else positions,
+            "rate_limiter": ENGINE.coindcx.limiter_stats()}
+
+
+class ReplayRequest(BaseModel):
+    date: str
+    hurdle_pct: Optional[float] = Field(default=None, gt=0, le=10)
+    basis_filter: Optional[bool] = None
+    basis_window_s: Optional[int] = Field(default=None, ge=30, le=3600)
+    leverage: Optional[int] = Field(default=None, ge=1, le=100)
+    num_slots: Optional[int] = Field(default=None, ge=1, le=50)
+    equity_inr: Optional[float] = Field(default=None, gt=0)
+    timeout_seconds: Optional[int] = Field(default=None, ge=1, le=3600)
+    stop_loss_pct: Optional[float] = Field(default=None, gt=0, le=50)
+
+
+REPLAY: Dict[str, Any] = {"running": False, "result": None, "error": None}
+
+
+@api.get("/replay/sessions")
+async def replay_sessions():
+    return {"items": ENGINE.recorder.sessions(), "recorder": ENGINE.recorder.status()}
+
+
+@api.post("/replay/run")
+async def replay_run(body: ReplayRequest):
+    if REPLAY["running"]:
+        raise HTTPException(status_code=409, detail="replay already running")
+    path = ENGINE.recorder.root / f"{body.date}.jsonl"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"no recording for {body.date}")
+    c = ENGINE.cfg
+    kw = dict(coins=c.coins,
+              hurdle_pct=body.hurdle_pct if body.hurdle_pct is not None else ENGINE.hurdle_pct(),
+              basis_filter=c.basis_filter if body.basis_filter is None else body.basis_filter,
+              basis_window_s=body.basis_window_s or c.basis_window_s,
+              leverage=body.leverage or c.leverage, num_slots=body.num_slots or c.num_slots,
+              equity_inr=body.equity_inr or c.starting_capital_inr,
+              timeout_seconds=body.timeout_seconds or c.timeout_seconds,
+              stop_loss_pct=body.stop_loss_pct or c.stop_loss_pct,
+              fee_round_trip_pct=c.entry_taker_fee_pct + c.exit_taker_fee_pct)
+    REPLAY.update({"running": True, "error": None})
+    try:
+        await asyncio.to_thread(ENGINE.recorder._flush)
+        res = await asyncio.to_thread(replay_session, path, **kw)
+        REPLAY["result"] = res
+        await ENGINE.store.log("INFO", f"Replay {body.date}: {res['trades']} trades, net ₹{res['net_pnl_inr']:+.2f} @ hurdle {kw['hurdle_pct']:.3f}%")
+        return res
+    except Exception as e:
+        REPLAY["error"] = str(e)
+        raise HTTPException(status_code=500, detail=f"replay failed: {e}")
+    finally:
+        REPLAY["running"] = False
+
+
+@api.get("/replay/last")
+async def replay_last():
+    return REPLAY
 
 
 @api.get("/analytics/coins")
@@ -179,7 +257,7 @@ async def telegram_digest_now():
     try:
         await ENGINE.send_daily_digest(raise_on_error=True, bench=BENCH.get("result"))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Telegram error: {e}")
+        raise HTTPException(status_code=424, detail=f"Telegram error: {e}")
     return {"ok": True, "status": ENGINE.telegram.status()}
 
 
@@ -189,6 +267,7 @@ async def update_config(body: ConfigUpdate):
     data = body.model_dump(exclude_none=True)
     for k, v in data.items():
         setattr(c, k, v)
+    ENGINE.persist()
     await ENGINE.store.log("INFO", f"Config updated: {data}")
     return await get_config()
 
@@ -386,7 +465,7 @@ async def telegram_test():
             raise_on_error=True,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Telegram error: {e}")
+        raise HTTPException(status_code=424, detail=f"Telegram error: {e}")
     await ENGINE.store.log("INFO", f"Telegram test alert sent via @{me.get('username', '?')}")
     return {"ok": True, "bot": me.get("username"), "status": tg.status()}
 
@@ -399,7 +478,7 @@ async def telegram_summary_now():
     try:
         await ENGINE._send_hourly_summary(raise_on_error=True)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Telegram error: {e}")
+        raise HTTPException(status_code=424, detail=f"Telegram error: {e}")
     return {"ok": True, "status": ENGINE.telegram.status()}
 
 
@@ -414,7 +493,7 @@ async def coinswitch_check():
         wb = await ENGINE.coinswitch.wallet_balance()
         return {"ok": True, "wallet_balance": wb}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"CoinSwitch API error: {e}")
+        raise HTTPException(status_code=424, detail=f"CoinSwitch API error: {e}")
 
 
 @api.get("/hourly-summary")

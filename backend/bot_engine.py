@@ -25,6 +25,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import random
 import time
 import uuid
@@ -36,6 +37,8 @@ import aiohttp
 
 from coinswitch_client import CoinSwitchError, CoinSwitchFuturesClient
 from coindcx_client import CoinDCXError, CoinDCXFuturesClient
+from replay import TickRecorder
+from settings_store import apply_settings, load_settings, save_settings
 
 logger = logging.getLogger("bot_engine")
 
@@ -82,6 +85,9 @@ class BotConfig:
     basis_filter: bool = True              # subtract rolling median basis from spread
     basis_window_s: int = 300
     digest_time_ist: str = "23:30"
+    data_dir: str = ""                     # settings.json + ticks/ (default: <repo>/data)
+    record_ticks: bool = True
+    tick_retention_days: int = 7
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -119,6 +125,9 @@ class BotConfig:
             basis_filter=_b("BASIS_FILTER", True),
             basis_window_s=_i("BASIS_WINDOW_S", 300),
             digest_time_ist=os.environ.get("DIGEST_TIME_IST", "23:30"),
+            data_dir=os.environ.get("DATA_DIR", ""),
+            record_ticks=_b("RECORD_TICKS", True),
+            tick_retention_days=_i("TICK_RETENTION_DAYS", 7),
         )
 
 
@@ -549,34 +558,73 @@ class LiveCoinDCXBookFeed(LiveCoinSwitchBookFeed):
 
 
 class FXRateService:
-    """Maintains a real-time USDT/INR quote (Binance P2P median as source).
-    Falls back to config value if REST fails.
+    """USDT/INR quote = median of fresh sources (CoinGecko, CoinDCX spot USDTINR, Binance P2P top-10 median).
+    Falls back to the last good blend, then to the config value.
     """
+    FRESH_S = 180
+
     def __init__(self, fallback: float) -> None:
         self.rate = fallback
         self._fallback = fallback
         self._running = False
+        self.sources: Dict[str, Dict[str, Any]] = {}
+        self.last_update_ts = 0.0
+        self._task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         self._running = True
-        asyncio.create_task(self._loop())
+        self._task = asyncio.create_task(self._loop())
 
-    def stop(self) -> None: self._running = False
+    def stop(self) -> None:
+        self._running = False
+        if self._task: self._task.cancel()
+
+    def status(self) -> Dict[str, Any]:
+        now = time.time()
+        return {"rate": round(self.rate, 4), "last_update_age_s": round(now - self.last_update_ts, 1) if self.last_update_ts else None,
+                "sources": {k: {"rate": v.get("rate"), "age_s": round(now - v["ts"], 1) if v.get("ts") else None,
+                                "error": v.get("error", "")} for k, v in self.sources.items()},
+                "used": [k for k, v in self.sources.items() if v.get("rate") and now - v.get("ts", 0) < self.FRESH_S]}
+
+    async def _coingecko(self, s: aiohttp.ClientSession) -> float:
+        async with s.get("https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=inr") as r:
+            d = await r.json(content_type=None)
+            return float(d.get("tether", {}).get("inr", 0) or 0)
+
+    async def _coindcx(self, s: aiohttp.ClientSession) -> float:
+        async with s.get("https://api.coindcx.com/exchange/ticker") as r:
+            for x in await r.json(content_type=None):
+                if x.get("market") == "USDTINR":
+                    bid, ask = float(x.get("bid") or 0), float(x.get("ask") or 0)
+                    return (bid + ask) / 2 if bid and ask else float(x.get("last_price") or 0)
+        return 0.0
+
+    async def _binance_p2p(self, s: aiohttp.ClientSession) -> float:
+        body = {"asset": "USDT", "fiat": "INR", "tradeType": "BUY", "rows": 10, "page": 1, "payTypes": [], "publisherType": None}
+        async with s.post("https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search", json=body) as r:
+            d = (await r.json(content_type=None)).get("data") or []
+            px = sorted(float(a["adv"]["price"]) for a in d if a.get("adv", {}).get("price"))
+            return px[len(px) // 2] if px else 0.0
 
     async def _loop(self) -> None:
-        while self._running:
-            try:
+        fetchers = {"coingecko": self._coingecko, "coindcx": self._coindcx, "binance_p2p": self._binance_p2p}
+        try:
+            while self._running:
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
-                    async with s.get("https://api.coingecko.com/api/v3/simple/price"
-                                     "?ids=tether&vs_currencies=inr") as r:
-                        if r.status == 200:
-                            d = await r.json()
-                            rate = float(d.get("tether", {}).get("inr", 0) or 0)
-                            if 60 < rate < 130:
-                                self.rate = rate
-            except Exception:
-                pass  # keep last known
-            await asyncio.sleep(30)
+                    results = await asyncio.gather(*(f(s) for f in fetchers.values()), return_exceptions=True)
+                now = time.time()
+                for name, res in zip(fetchers, results):
+                    if isinstance(res, Exception) or not (60 < float(res or 0) < 130):
+                        self.sources.setdefault(name, {})["error"] = str(res)[:80] if isinstance(res, Exception) else "out of range/empty"
+                    else:
+                        self.sources[name] = {"rate": round(float(res), 4), "ts": now, "error": ""}
+                fresh = sorted(v["rate"] for v in self.sources.values() if v.get("rate") and now - v.get("ts", 0) < self.FRESH_S)
+                if fresh:
+                    self.rate = fresh[len(fresh) // 2] if len(fresh) % 2 else (fresh[len(fresh)//2 - 1] + fresh[len(fresh)//2]) / 2
+                    self.last_update_ts = now
+                await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -730,6 +778,10 @@ class BotEngine:
             except Exception as e:
                 logger.warning(f"CoinDCX client init failed: {e}")
         self._basis_samples: Dict[str, List[tuple]] = {c: [] for c in cfg.coins}
+        self.data_dir = Path(cfg.data_dir) if cfg.data_dir else Path(__file__).resolve().parent.parent / "data"
+        self.settings_path = self.data_dir / "settings.json"
+        self.recorder = TickRecorder(self.data_dir / "ticks", cfg.tick_retention_days, enabled=cfg.record_ticks and not cfg.simulate)
+        self._restored_settings: Dict[str, Any] = {}
         # CoinSwitch REST client — only built when we have both keys AND we're
         # about to trade for real (paper mode still uses simulated fills).
         self.coinswitch: Optional[CoinSwitchFuturesClient] = None
@@ -767,6 +819,15 @@ class BotEngine:
         self.paused: set = set()
         self._live_missing_keys_warned = False
         self._stale_no_keys_warned = False
+        self._restored_settings = apply_settings(self, load_settings(self.settings_path))
+        if self._restored_settings:
+            logger.info(f"Restored persisted settings: {self._restored_settings}")
+
+    def persist(self) -> None:
+        try:
+            save_settings(self, self.settings_path)
+        except Exception as e:
+            logger.warning(f"settings persist failed: {e}")
 
     # --- lifecycle -----------------------------------------------------------
     async def start(self) -> None:
@@ -776,6 +837,7 @@ class BotEngine:
         if self.simulator: await self.simulator.start()
         if self.live_feed: await self.live_feed.start()
         if self.coinswitch_feed: await self.coinswitch_feed.start()
+        if self.recorder.enabled: await self.recorder.start()
         await self.fx.start()
         self._tasks = [
             asyncio.create_task(self._scan_loop()),
@@ -800,6 +862,8 @@ class BotEngine:
         if self.live_feed: self.live_feed.stop()
         if self.coinswitch_feed: self.coinswitch_feed.stop()
         if self.coinswitch_poller: self.coinswitch_poller.stop()
+        self.recorder.stop()
+        self.persist()
         self.fx.stop()
         await self.store.log("INFO", "Bot stopped")
 
@@ -876,6 +940,9 @@ class BotEngine:
                 "active": bool(self.coinswitch_poller and self.coinswitch_poller.running),
                 "rate_limiter": self.coinswitch.limiter_stats() if self.coinswitch else None,
             },
+            "fx": self.fx.status(),
+            "recorder": self.recorder.status(),
+            "restored_settings": self._restored_settings,
         }
 
     def hurdle_pct(self) -> float:
@@ -933,6 +1000,7 @@ class BotEngine:
         if coin not in self.cfg.coins: return False
         if paused: self.paused.add(coin)
         else: self.paused.discard(coin)
+        self.persist()
         return True
 
     # --- signal / scan -------------------------------------------------------
@@ -952,6 +1020,7 @@ class BotEngine:
         leader_inr_mid = leader.mid * fx
         # gross divergence % vs laggard mid
         gross_pct = (leader_inr_mid - lagg.mid) / lagg.mid * 100.0
+        self.recorder.record(coin, leader.bid, leader.ask, lagg.bid, lagg.ask, fx)
         basis = self._update_basis(coin, gross_pct)
         adj_pct = gross_pct - basis if self.cfg.basis_filter else gross_pct
         self._last_gross_pct[coin] = gross_pct
@@ -1002,6 +1071,7 @@ class BotEngine:
         self.total_hold_sec = self.total_exec_latency_ms = 0.0
         if hasattr(self.store, "equity_curve"): self.store.equity_curve = []
         await self.store.push_equity(time.time(), equity_inr)
+        self.persist()
         await self.store.log("INFO", f"Account reset: equity ₹{equity_inr:.2f}, stats zeroed (closed history kept)")
 
     async def apply_leverage(self, leverage: int) -> List[str]:
@@ -1021,6 +1091,7 @@ class BotEngine:
                 errors.append(f"{c}: {e}")
         if errors: await self.store.log("WARN", f"Leverage update failed for {len(errors)} symbols: {errors[:3]}")
         else: await self.store.log("INFO", f"Leverage set to {leverage}x")
+        self.persist()
         return errors
 
     def coin_analytics(self) -> List[Dict[str, Any]]:
@@ -1231,6 +1302,7 @@ class BotEngine:
         self.trade_count += 1
         if pos.net_pnl_inr >= 0: self.win_count += 1
         else: self.loss_count += 1
+        self.persist()
         self.total_hold_sec += (pos.closed_at - pos.opened_at)
         if pos.exec_latency_ms: self.total_exec_latency_ms += pos.exec_latency_ms
         await self.store.close(pos)
