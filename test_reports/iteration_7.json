@@ -1,0 +1,62 @@
+{
+  "summary": "Iteration 7: tested (1) POST /api/coindcx/check -> 424 JSON with 'CoinDCX API 401' + '401 = key/secret rejected' hint; (2) /api/telemetry feed.fx {rate in 60..130, sources coingecko/coindcx/binance_p2p all numeric, used list, rate == median(used) within 0.01}, feed.recorder {enabled, lines_written>0, retention_days=7, sessions[]}, feed.restored_settings dict; (3) /api/status fx_usdt_inr == feed.fx.rate; (4) Persistence: pause DOGE + POST /api/account {slots:7, leverage:2} -> settings.json updated -> sudo supervisorctl restart backend -> after restart /api/status has slots=7 lev=2, /api/spreads DOGE paused=true, telemetry.feed.restored_settings.paused==['DOGE'] and num_slots=7 -> restored to slots=10 lev=1 DOGE resumed; (5) /api/replay/sessions returns items with date/size_mb/modified plus recorder object; (6) POST /api/replay/run {date:today, hurdle_pct:0.05, leverage:3} -> full schema (file, lines>0, span_s>0, params{hurdle 0.05, leverage 3, num_slots, equity_inr, basis_filter}, trades:27, wins, win_rate:25.9%, net_pnl_inr:-4.36, final==equity+net within 0.01, per_coin[], equity_curve[{ts,equity}], last_trades[]); with hurdle_pct=5.0 -> 0 trades net 0; /api/replay/last -> {running:false, result:{...}, error:null}; bad date -> 404; hurdle_pct 0 -> 422; (7) regression /api/spreads, /analytics/coins, /benchmark/status, /hurdle/simulate?hurdle_pct=0.1, /positions/closed/export.csv, /telegram/status all 200. Frontend: session-replay-panel and all sub-testids (replay-date-select w/ today option, hurdle/leverage/slots/timeout/stop inputs, basis checkbox, run-btn, recorder-status-text) present. Setting hurdle=0.05 and clicking Replay -> replay-result appears within ~2s with all 4 metric testids, equity-curve-chart-card inside panel, replay-per-coin-table. coindcx-check-btn click shows coindcx-check-result with '✗ CoinDCX API 401'. fx-sources-row shows blended rate + coingecko/coindcx/binance_p2p chips with numeric values (95.96 / 99.59 / 103). No horizontal overflow at 390px. Bot left RUNNING, PAPER, 10 slots, lev 1, no coins paused, no Telegram sent.",
+  "tested_scope": ["backend", "frontend", "integration"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Session Replay panel", "issues": ["recorder-status-text renders as 'recorder ON · 882 ticks this run · 1 day file(s) · keep 7 d' — spec says 'RECORDER ON' (uppercase). Case-insensitive match passes but consider uppercasing for consistency with other status labels (e.g. 'WS LIVE')."]},
+      {"screen": "Console (all viewports)", "issues": ["Persistent React hydration error: <span data-ve-dynamic> injected inside <option> in benchmark-duration-select — Emergent tooling instrumentation, not an app bug (flagged since iter5).", "Expected 424 response from /api/coindcx/check logs as 'Failed to load resource: 424' in console — cosmetic, harmless."]}
+    ]
+  },
+  "passed": [
+    "POST /api/coindcx/check -> 424 JSON with 'CoinDCX API 401' and '401 = key/secret rejected: check IP whitelist, Futures permission, or re-copy the secret'",
+    "/api/telemetry feed.fx.rate=99.59 in [60,130]; sources.coingecko=95.96, coindcx=99.59, binance_p2p=103 (all 3 numeric); used=['coingecko','coindcx','binance_p2p']; rate==median(used) within 0.01",
+    "feed.recorder.enabled=true, lines_written>0 (~882), retention_days=7, sessions is a list",
+    "feed.restored_settings is a dict (num_slots, leverage, paused etc)",
+    "/api/status fx_usdt_inr equals feed.fx.rate within 0.001",
+    "Persistence: pause DOGE + slots=7 lev=2 -> /app/data/settings.json paused:['DOGE'], config.num_slots=7, config.leverage=2, state.equity_inr float",
+    "After `sudo supervisorctl restart backend` (waited ~15s), /api/status num_slots=7 leverage=2; /api/spreads DOGE paused:true; telemetry.feed.restored_settings.num_slots=7 and 'DOGE' in restored_settings.paused",
+    "Restore POST /api/coins/DOGE/resume + POST /api/account {num_slots:10, leverage:1} -> settings.json updated: paused=[], num_slots=10, leverage=1",
+    "GET /api/replay/sessions -> {items:[{date:'2026-09-19', size_mb, modified}], recorder{...}}",
+    "POST /api/replay/run {date:today, hurdle_pct:0.05, leverage:3} -> 200 with file, lines>0, span_s>0, params{hurdle_pct:0.05, leverage:3, num_slots, equity_inr, basis_filter}, trades:27, wins, win_rate:25.9%, net_pnl_inr:-4.36, final_equity_inr == equity_inr + net_pnl_inr within 0.01, per_coin list, equity_curve list of {ts,equity}, last_trades list",
+    "POST /api/replay/run hurdle_pct=5.0 -> trades=0, net_pnl_inr=0",
+    "GET /api/replay/last -> {running:false, result:{...}, error:null}",
+    "POST /api/replay/run date='2000-01-01' -> 404; hurdle_pct=0 -> 422",
+    "Regression 200: /api/spreads, /api/analytics/coins, /api/benchmark/status, /api/hurdle/simulate?hurdle_pct=0.1, /api/positions/closed/export.csv, /api/telegram/status",
+    "Frontend: [data-testid=session-replay-panel] + replay-date-select (has '2026-09-19' option), replay-hurdle-input, replay-leverage-input, replay-slots-input, replay-timeout-input, replay-stop-input, replay-basis-checkbox, replay-run-btn, recorder-status-text all present",
+    "Set hurdle=0.05, click replay-run-btn -> [data-testid=replay-result] appears within ~2s; replay-metric-trades='27', replay-metric-net-pnl='₹-4.36', replay-metric-win-rate='25.9%', replay-metric-max-dd='0.099%'; equity-curve-chart-card rendered INSIDE session-replay-panel; replay-per-coin-table present (trades>0)",
+    "[data-testid=coindcx-check-btn] click -> [data-testid=coindcx-check-result] shows '✗ CoinDCX API 401: {code:401, message:Invalid credentials, ...} (401 = key/secret rejected: check IP whitelist, Futures permission, or re-copy the secret)'",
+    "[data-testid=fx-sources-row] shows 'USDT/INR blend ₹99.59 = median of ...' with fx-source-coingecko (95.96), fx-source-coindcx (99.59), fx-source-binance_p2p (103) chips",
+    "Regression testids present: account-controls-panel, slot-analytics-section, leverage-slots-badge",
+    "390px viewport: documentElement.scrollWidth == clientWidth == body.scrollWidth == 390 (no horizontal overflow)",
+    "Bot left RUNNING, PAPER, 10 slots, leverage 1, no coins paused, no Telegram sent this iteration"
+  ],
+  "failed": [],
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter7.py",
+    "/app/test_reports/pytest/iter7.xml"
+  ],
+  "action_items": [
+    "COSMETIC: Uppercase 'recorder ON' -> 'RECORDER ON' in recorder-status-text (App.js ReplayPanel) to match spec and other status labels ('WS LIVE', 'MODE · PAPER').",
+    "LOW (already flagged in iter5/6): Emergent tooling injects <span data-ve-dynamic> inside <option> causing React hydration console error on benchmark-duration-select. Not an app bug; Emergent tooling team to fix."
+  ],
+  "critical_code_review_comments": [
+    "FXRateService median blend works correctly with all 3 sources live (coingecko 95.96 / coindcx 99.59 / binance_p2p 103, median 99.59 == rate). Handles per-source failures gracefully via `used[]`.",
+    "settings_store persist() is invoked on update_config, set_mode, update_account and coin pause/resume paths — verified via /app/data/settings.json inspection before+after restart. Note: current settings.json 'paper_trading' key exists but /api/status returned paper_trading:null — worth double-checking status serializer maps CFG_KEYS['paper_trading'] -> status['paper_trading'] rather than a different key ('mode'?). Not blocking since UI badge shows 'MODE · PAPER' correctly.",
+    "Replay engine: for hurdle_pct=5.0 returns 0 trades and net_pnl 0 exactly — good deterministic behavior. Params echo includes basis_filter/equity_inr/num_slots — good for reproducibility.",
+    "TickRecorder writes IST-day files (verified /app/data/ticks/2026-09-19.jsonl with 882+ lines) and retention_days=7 config surfaced via telemetry."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_backend_iter7.py",
+    "/app/test_reports/iteration_7.json"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% of in-scope testids and integrations"},
+  "test_credentials": "none required",
+  "seed_data_creation": "Persistence test paused DOGE and set slots=7/lev=2, then restarted backend to verify hydration, then restored to slots=10/lev=1 DOGE resumed. Replay ran on today's IST tick file (2026-09-19).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Bot RUNNING, PAPER, 10 slots, lev 1, no coins paused, equity ~₹4000.33. /app/data/ticks/2026-09-19.jsonl has ~882+ lines and grows continuously. CoinDCX keys in backend/.env are rejected by CoinDCX (401) — coindcx/check is expected to return 424. Reusable regression file: /app/backend/tests/test_backend_iter7.py (16 tests; NB test_persistence_and_restart restarts supervisor backend, plan accordingly). /api/status.paper_trading field returned null even though config.paper_trading=true — worth verifying serializer if future iterations rely on it.",
+  "rca of the issue": "No blocking issues found."
+}

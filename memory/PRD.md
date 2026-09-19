@@ -130,12 +130,33 @@ SQLite persistence, paper/live toggle.
   /api/telegram/digest`; includes per-coin table, feed health, last benchmark.
 - Testing: `iteration_6.json` backend 10/10, frontend pass, 390px no overflow.
 
+### Iteration 7 (2026-06, "CoinDCX preflight · Persistence · Robust FX · Session Replay")
+- `POST /api/coindcx/check` wallet+positions preflight (user keys stored in
+  backend/.env but CoinDCX returns 401 Invalid credentials — even spot
+  `users/info`; likely IP whitelist / permission / secret copy issue).
+  Upstream errors now use HTTP 424 (preview ingress swallows 502).
+- `settings_store.py`: settings.json in `DATA_DIR` (default /app/data) with
+  config (slots, leverage, capital, mode, basis, fees, timeout, stop), state
+  (equity, PnL, counters) and paused coins; restored at engine init; saved on
+  every config/account/pause/mode change and each trade close.
+- `FXRateService` = median of CoinGecko, CoinDCX USDTINR mid, Binance P2P
+  top-10 median (observed 95.96 / 99.59 / 103 → blend 99.56); sources +
+  freshness in `telemetry.feed.fx`; chips in config panel.
+- `replay.py`: `TickRecorder` → `data/ticks/YYYY-MM-DD.jsonl` (IST day,
+  1 s flush, 7-day prune, `RECORD_TICKS`, `TICK_RETENTION_DAYS`);
+  `replay_session()` offline pass of the exact signal rules (basis, hurdle,
+  slots, leverage, target/stop/timeout). Endpoints `/api/replay/sessions`,
+  `/api/replay/run`, `/api/replay/last`; dashboard Session Replay panel with
+  params, metrics, equity curve, per-coin table.
+- Testing: `iteration_7.json` backend + frontend all pass (incl. restart
+  persistence round-trip).
+
 ## Prioritized backlog
-- P1: Multi-source FX (Binance P2P median) for robustness beyond CoinGecko.
-- P1: Live-test CoinDCX executor once user supplies COINDCX_API_KEY/SECRET
-  (order shape verified against docs, not against a real account yet).
-- P2: Persist paused coins / account settings across restarts (SQLite in CLI).
+- P1: CoinDCX keys currently rejected (401) — re-verify after user fixes IP
+  whitelist / permissions; then live-test `_live_market` on Pair B.
+- P2: Persist open positions / closed history for the web store (CLI uses SQLite).
 - P2: Dynamic asset-universe screening (24h volume / liquidity).
+- P2: Replay parameter sweep (grid over hurdle × basis window) with heat table.
 
 ## Deployment
 - EC2 t3.small (Mumbai) recommended. Use `tmux` + `python standalone_bot/run_bot.py`.

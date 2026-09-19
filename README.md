@@ -197,3 +197,9 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
 | `COINDCX_API_KEY` / `COINDCX_API_SECRET` | empty | HMAC keys for CoinDCX Futures orders (LIVE only). |
 | `BASIS_FILTER` / `BASIS_WINDOW_S` | `true` / `300` | Subtract the rolling median CoinSwitch–Binance offset so a standing basis is not traded as lag. |
 | `DIGEST_TIME_IST` | `23:30` | Daily Telegram digest time (per-coin table, feed health, last benchmark). |
+
+## Persistence, FX blend & session replay
+- `DATA_DIR` (default `./data`): `settings.json` (slots, leverage, equity, PnL counters, paused coins, config) restored on restart; `ticks/YYYY-MM-DD.jsonl` tick recordings (`RECORD_TICKS=true`, `TICK_RETENTION_DAYS=7`).
+- USDT/INR = median of CoinGecko, CoinDCX spot USDTINR and Binance P2P; sources visible in the dashboard config panel.
+- Session Replay panel / `POST /api/replay/run` replays any recorded day through the engine rules with your own hurdle / basis / leverage / slots.
+- `POST /api/coindcx/check` — CoinDCX Futures key preflight (dashboard "Check CoinDCX").
