@@ -29,13 +29,15 @@ class CoinDCXError(Exception):
 
 
 class CoinDCXFuturesClient:
-    def __init__(self, api_key: str, api_secret: str, base_url: str = BASE_URL, timeout_s: float = 10.0) -> None:
+    def __init__(self, api_key: str, api_secret: str, base_url: str = BASE_URL, timeout_s: float = 10.0,
+                 margin_currency: str = "USDT") -> None:
         if not api_key or not api_secret:
             raise ValueError("api_key and api_secret are required")
         self.api_key = api_key
         self._secret = api_secret.encode()
         self.base_url = base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
+        self.margin_currency = (margin_currency or "USDT").upper()   # INR or USDT margined futures
         self.limiter = RateLimiterGroup(600)   # 16 req/s general; stay well below
         self.http_429_count = 0
 
@@ -65,21 +67,33 @@ class CoinDCXFuturesClient:
     async def wallet_balance(self) -> Any:
         return await self._request("GET", "/exchange/v1/derivatives/futures/wallets")
 
+    async def autodetect_margin_currency(self) -> str:
+        """Pick INR or USDT — whichever futures wallet holds more free balance."""
+        wallets = await self.wallet_balance()
+        best, best_bal = self.margin_currency, -1.0
+        for w in wallets if isinstance(wallets, list) else []:
+            cur = str(w.get("currency_short_name", "")).upper()
+            if cur in ("INR", "USDT"):
+                bal = float(w.get("balance") or 0)
+                if bal > best_bal: best, best_bal = cur, bal
+        self.margin_currency = best
+        return best
+
     async def positions(self, pairs: Optional[List[str]] = None) -> Any:
-        body: Dict[str, Any] = {"page": "1", "size": "50", "margin_currency_short_name": ["USDT"]}
+        body: Dict[str, Any] = {"page": "1", "size": "50", "margin_currency_short_name": [self.margin_currency]}
         if pairs: body["pairs"] = ",".join(pairs)
         return await self._request("POST", "/exchange/v1/derivatives/futures/positions", body)
 
     async def update_leverage(self, coin: str, leverage: int) -> Any:
         return await self._request("POST", "/exchange/v1/derivatives/futures/positions/update_leverage",
                                    {"pair": self.pair(coin), "leverage": str(int(leverage)),
-                                    "margin_currency_short_name": "USDT"})
+                                    "margin_currency_short_name": self.margin_currency})
 
     async def market_order(self, coin: str, side: str, quantity: float, leverage: int) -> Dict[str, Any]:
         res = await self._request("POST", "/exchange/v1/derivatives/futures/orders/create", {
             "order": {"side": side.lower(), "pair": self.pair(coin), "order_type": "market_order",
                       "total_quantity": quantity, "leverage": int(leverage),
-                      "notification": "no_notification", "margin_currency_short_name": "USDT"}})
+                      "notification": "no_notification", "margin_currency_short_name": self.margin_currency}})
         return res[0] if isinstance(res, list) and res else res
 
     async def cancel_order(self, order_id: str) -> Any:
@@ -88,28 +102,33 @@ class CoinDCXFuturesClient:
     async def list_orders(self, status: str, side: str) -> List[Dict[str, Any]]:
         res = await self._request("POST", "/exchange/v1/derivatives/futures/orders",
                                   {"status": status, "side": side.lower(), "page": "1", "size": "50",
-                                   "margin_currency_short_name": ["USDT"]})
+                                   "margin_currency_short_name": [self.margin_currency]})
         return res if isinstance(res, list) else (res.get("data") or [])
 
-    async def wait_for_fill(self, order_id: str, side: str, timeout_s: float = 5.0, poll_s: float = 0.4) -> Dict[str, Any]:
+    async def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
+        res = await self._request("POST", "/exchange/v1/derivatives/futures/orders",
+                                  {"id": order_id, "margin_currency_short_name": [self.margin_currency]})
+        items = res if isinstance(res, list) else (res.get("data") or [])
+        return next((o for o in items if o.get("id") == order_id), items[0] if items else None)
+
+    async def wait_for_fill(self, order_id: str, side: str, timeout_s: float = 5.0, poll_s: float = 0.25) -> Dict[str, Any]:
         deadline = time.time() + timeout_s
         last: Dict[str, Any] = {}
         while time.time() < deadline:
-            for status in ("filled", "open", "cancelled", "rejected", "partially_filled"):
-                try:
-                    for o in await self.list_orders(status, side):
-                        if o.get("id") == order_id:
-                            last = o
-                            if str(o.get("status", "")).lower() in TERMINAL:
-                                return o
-                except CoinDCXError:
-                    pass
+            try:
+                o = await self.get_order(order_id)
+                if o:
+                    last = o
+                    if str(o.get("status", "")).lower() in TERMINAL:
+                        return o
+            except CoinDCXError:
+                pass
             await asyncio.sleep(poll_s)
         return last
 
     async def instrument(self, coin: str) -> Dict[str, Any]:
         """Public instrument details: min_notional, quantity_increment, taker_fee, max leverage…"""
-        url = f"{self.base_url}/exchange/v1/derivatives/futures/data/instrument?pair={self.pair(coin)}&margin_currency_short_name=USDT"
+        url = f"{self.base_url}/exchange/v1/derivatives/futures/data/instrument?pair={self.pair(coin)}&margin_currency_short_name={self.margin_currency}"
         async with aiohttp.ClientSession(timeout=self._timeout) as s:
             async with s.get(url) as r:
                 d = await r.json(content_type=None)

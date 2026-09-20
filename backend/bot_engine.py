@@ -804,7 +804,8 @@ class BotEngine:
         self.coindcx: Optional[CoinDCXFuturesClient] = None
         if cfg.coindcx_api_key and cfg.coindcx_api_secret:
             try:
-                self.coindcx = CoinDCXFuturesClient(cfg.coindcx_api_key, cfg.coindcx_api_secret)
+                self.coindcx = CoinDCXFuturesClient(cfg.coindcx_api_key, cfg.coindcx_api_secret,
+                                                    margin_currency=os.environ.get("COINDCX_MARGIN_CURRENCY", "USDT"))
             except Exception as e:
                 logger.warning(f"CoinDCX client init failed: {e}")
         self._basis_samples: Dict[str, List[tuple]] = {c: [] for c in cfg.coins}

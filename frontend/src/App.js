@@ -663,11 +663,11 @@ function Dashboard() {
     setReplayRunning(false);
   };
   const [dcxCheck, setDcxCheck] = useState(null);
-  const [dcxTest, setDcxTest] = useState({ coin: "DOGE", notional_usdt: 6, confirm: false, loading: false, result: null });
+  const [dcxTest, setDcxTest] = useState({ coin: "DOGE", notional_usdt: 6, leverage: 2, confirm: false, loading: false, result: null });
   const runDcxTestOrder = async () => {
     setDcxTest((t) => ({ ...t, loading: true, result: null }));
     try {
-      const r = await axios.post(`${API}/coindcx/test-order`, { coin: dcxTest.coin, notional_usdt: Number(dcxTest.notional_usdt), confirm: dcxTest.confirm });
+      const r = await axios.post(`${API}/coindcx/test-order`, { coin: dcxTest.coin, notional_usdt: Number(dcxTest.notional_usdt), leverage: Number(dcxTest.leverage) || 1, confirm: dcxTest.confirm });
       setDcxTest((t) => ({ ...t, loading: false, result: r.data }));
     } catch (e) {
       const d = e.response?.data?.detail;
@@ -1012,9 +1012,10 @@ function Dashboard() {
               )}
               <div data-testid="coindcx-test-order-panel" className="mt-3 rounded border border-[#1E2638] bg-[#0A0D12] p-3">
                 <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono mb-2">Pair B test order · market BUY → reduce-only SELL (real money)</div>
-                <div className="grid grid-cols-3 gap-2 text-xs">
+                <div className="grid grid-cols-4 gap-2 text-xs">
                   <label className="block"><span className="text-[10px] text-slate-500 font-mono">Coin</span><input data-testid="coindcx-test-coin-input" value={dcxTest.coin} onChange={(e) => setDcxTest({ ...dcxTest, coin: e.target.value.toUpperCase() })} className="mt-1 w-full bg-[#121721] border border-[#1E2638] rounded px-2 py-1 font-mono text-slate-100 text-xs"/></label>
                   <label className="block"><span className="text-[10px] text-slate-500 font-mono">Size USDT (≥6)</span><input data-testid="coindcx-test-size-input" type="number" min="1" max="50" step="1" value={dcxTest.notional_usdt} onChange={(e) => setDcxTest({ ...dcxTest, notional_usdt: e.target.value })} className="mt-1 w-full bg-[#121721] border border-[#1E2638] rounded px-2 py-1 font-mono text-slate-100 text-xs"/></label>
+                  <label className="block"><span className="text-[10px] text-slate-500 font-mono">Leverage</span><input data-testid="coindcx-test-leverage-input" type="number" min="1" max="10" step="1" value={dcxTest.leverage} onChange={(e) => setDcxTest({ ...dcxTest, leverage: e.target.value })} className="mt-1 w-full bg-[#121721] border border-[#1E2638] rounded px-2 py-1 font-mono text-slate-100 text-xs"/></label>
                   <label className="flex items-end gap-2 pb-1 text-[10px] font-mono text-slate-400"><input data-testid="coindcx-test-confirm-checkbox" type="checkbox" checked={dcxTest.confirm} onChange={(e) => setDcxTest({ ...dcxTest, confirm: e.target.checked })} className="h-4 w-4 accent-rose-500"/> I understand this trades real funds</label>
                 </div>
                 <button data-testid="coindcx-test-order-btn" onClick={runDcxTestOrder} disabled={!dcxCheck?.ok || !dcxTest.confirm || dcxTest.loading} title={!dcxCheck?.ok ? "run Check CoinDCX first" : ""} className="mt-2 w-full py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest bg-rose-700 hover:bg-rose-600 text-white transition-colors duration-150 disabled:opacity-40">{dcxTest.loading ? "Placing…" : "Place test round-trip"}</button>

@@ -180,6 +180,7 @@ async def coindcx_check():
     if ENGINE.coindcx is None:
         raise HTTPException(status_code=400, detail="CoinDCX keys not configured — set COINDCX_API_KEY/SECRET in backend/.env and restart")
     try:
+        margin_ccy = await ENGINE.coindcx.autodetect_margin_currency()
         wallets = await ENGINE.coindcx.wallet_balance()
         positions = await ENGINE.coindcx.positions()
     except CoinDCXError as e:
@@ -187,14 +188,15 @@ async def coindcx_check():
         raise HTTPException(status_code=424, detail=f"CoinDCX API {e.status}: {e.body}{hint}")
     except Exception as e:
         raise HTTPException(status_code=424, detail=f"CoinDCX unreachable: {e}")
-    await ENGINE.store.log("INFO", "CoinDCX preflight OK — wallet reachable")
-    return {"ok": True, "wallets": wallets, "positions": positions if isinstance(positions, list) else positions,
+    await ENGINE.store.log("INFO", f"CoinDCX preflight OK — wallet reachable · margin currency {margin_ccy}")
+    return {"ok": True, "margin_currency": margin_ccy, "wallets": wallets, "positions": positions if isinstance(positions, list) else positions,
             "rate_limiter": ENGINE.coindcx.limiter_stats()}
 
 
 class CoinDCXTestOrder(BaseModel):
     coin: str = "DOGE"
     notional_usdt: float = Field(default=6.0, ge=1, le=50)
+    leverage: int = Field(default=1, ge=1, le=10)
     confirm: bool = False
 
 
@@ -209,32 +211,38 @@ async def coindcx_test_order(body: CoinDCXTestOrder):
     c = ENGINE.coindcx
     steps: List[Dict[str, Any]] = []
     try:
+        margin_ccy = await c.autodetect_margin_currency()
         wallets = await c.wallet_balance()
-        steps.append({"step": "wallet", "ok": True, "data": wallets if isinstance(wallets, list) else [wallets]})
+        free = {str(w.get("currency_short_name", "")).upper(): float(w.get("balance") or 0) for w in (wallets if isinstance(wallets, list) else [])}
+        steps.append({"step": "wallet", "ok": True, "margin_currency": margin_ccy, "free": free})
         inst = await c.instrument(coin)
         px = await c.last_price(coin)
         if px <= 0: raise HTTPException(status_code=424, detail=f"no CoinDCX price for {coin}")
         min_notional = float(inst.get("min_notional") or 6)
-        notional = max(body.notional_usdt, min_notional)
+        notional = max(body.notional_usdt, min_notional * 1.05)   # exchange converts min at its own FX — keep a buffer
         step = float(inst.get("quantity_increment") or 1e-6)
-        qty = math.floor((notional / px) / step) * step
+        qty = math.ceil((notional / px) / step) * step
         qty = max(qty, float(inst.get("min_quantity") or step))
         qty = float(f"{qty:.10g}")
+        need = qty * px * (ENGINE.fx.rate if margin_ccy == "INR" else 1.0) * 1.02 / body.leverage
+        if free.get(margin_ccy, 0) < need:
+            raise HTTPException(status_code=424, detail={"message": f"insufficient free {margin_ccy} margin: have {free.get(margin_ccy, 0):.2f}, need ≈ {need:.2f}", "steps": steps})
         steps.append({"step": "sizing", "ok": True, "price": px, "qty": qty, "notional_usdt": round(qty * px, 4),
+                      "margin_needed": round(need, 2), "margin_currency": margin_ccy,
                       "min_notional": min_notional, "taker_fee": inst.get("taker_fee"), "quantity_increment": step})
         try:
-            await c.update_leverage(coin, 1)
-            steps.append({"step": "leverage", "ok": True, "leverage": 1})
+            await c.update_leverage(coin, body.leverage)
+            steps.append({"step": "leverage", "ok": True, "leverage": body.leverage})
         except CoinDCXError as e:
             steps.append({"step": "leverage", "ok": False, "error": f"{e.status}: {e.body}"})
         t0 = time.perf_counter()
-        opened = await c.market_order(coin, "buy", qty, 1)
+        opened = await c.market_order(coin, "buy", qty, body.leverage)
         oid = str(opened.get("id") or "")
         fill = await c.wait_for_fill(oid, "buy", timeout_s=6) or opened
         steps.append({"step": "buy", "ok": True, "order_id": oid, "status": fill.get("status"), "avg_price": fill.get("avg_price"),
                       "fee": fill.get("fee_amount"), "latency_ms": round((time.perf_counter() - t0) * 1000)})
         t1 = time.perf_counter()
-        closed = await c.market_order(coin, "sell", qty, 1)
+        closed = await c.market_order(coin, "sell", qty, body.leverage)
         cid = str(closed.get("id") or "")
         cfill = await c.wait_for_fill(cid, "sell", timeout_s=6) or closed
         steps.append({"step": "sell_close", "ok": True, "order_id": cid, "status": cfill.get("status"), "avg_price": cfill.get("avg_price"),
