@@ -89,6 +89,7 @@ class ConfigUpdate(BaseModel):
     phantom_frozen_s: Optional[float] = Field(default=None, ge=0.5, le=60)
     min_order_inr: Optional[float] = Field(default=None, ge=1, le=1e6)
     max_entry_frozen_s: Optional[float] = Field(default=None, ge=0.1, le=60)
+    spike_persist_ms: Optional[int] = Field(default=None, ge=0, le=10000)
 
 
 class AccountUpdate(BaseModel):
@@ -192,6 +193,8 @@ async def get_config():
         "phantom_frozen_s": c.phantom_frozen_s,
         "min_order_inr": c.min_order_inr,
         "max_entry_frozen_s": c.max_entry_frozen_s,
+        "spike_persist_ms": c.spike_persist_ms,
+        "scan_interval_s": c.scan_interval_s,
         "depth_bps": c.depth_bps,
     }
 

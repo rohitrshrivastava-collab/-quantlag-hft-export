@@ -99,6 +99,8 @@ class BotConfig:
     depth_bps: float = 10.0                # resting-depth window reported per coin
     min_order_inr: float = 100.0           # shrink floor: skip if the book can't absorb at least this
     max_entry_frozen_s: float = 1.0        # fresh-book filter: laggard top-5 must have changed within this many s
+    spike_persist_ms: int = 300            # Binance dislocation must stay above the hurdle this long before we fire
+    scan_interval_s: float = 0.1
     # shadow comparison assumptions (per laggard exchange)
     coinswitch_taker_fee_pct: float = 0.05
     coindcx_taker_fee_pct: float = 0.059
@@ -149,6 +151,8 @@ class BotConfig:
             depth_bps=_f("DEPTH_BPS", 10.0),
             min_order_inr=_f("MIN_ORDER_INR", 100.0),
             max_entry_frozen_s=_f("MAX_ENTRY_FROZEN_S", 1.0),
+            spike_persist_ms=_i("SPIKE_PERSIST_MS", 300),
+            scan_interval_s=_f("SCAN_INTERVAL_S", 0.1),
             coinswitch_taker_fee_pct=_f("COINSWITCH_TAKER_FEE_PCT", 0.05),
             coindcx_taker_fee_pct=_f("COINDCX_TAKER_FEE_PCT", 0.059),
             coinswitch_exec_latency_s=_f("COINSWITCH_EXEC_LATENCY_S", 1.0),
@@ -195,6 +199,8 @@ class Position:
     entry_order_id: Optional[str] = None
     exit_order_id: Optional[str] = None
     exec_latency_ms: Optional[float] = None
+    create_ms: Optional[float] = None         # LIVE: REST order-create round trip
+    fill_confirm_ms: Optional[float] = None   # LIVE: create ack → terminal fill (WS push or REST poll)
     leverage: int = 1
     notional_inr: float = 0.0
     basis_pct: float = 0.0
@@ -918,6 +924,11 @@ class BotEngine:
         self.paused: set = set()
         self._last_liq: Dict[str, Dict[str, Any]] = {}
         self.liq_stats: Dict[str, int] = {"phantom_skips": 0, "thin_skips": 0, "edge_skips": 0, "shrunk": 0, "stale_skips": 0}
+        self._armed: Dict[str, Tuple[str, float]] = {}
+        self._last_slow_ts: Dict[str, float] = {}
+        self.spike_stats: Dict[str, int] = {"crossings": 0, "persisted": 0, "reverted": 0}
+        self.total_create_ms = self.total_fill_confirm_ms = 0.0
+        self.live_fill_count = 0
         self._live_missing_keys_warned = False
         self._stale_no_keys_warned = False
         self._restored_settings = apply_settings(self, load_settings(self.settings_path))
@@ -1239,7 +1250,7 @@ class BotEngine:
             while self.running:
                 for coin in self.cfg.coins:
                     await self._scan_coin(coin)
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(max(0.05, self.cfg.scan_interval_s))
         except asyncio.CancelledError: pass
 
     async def _scan_coin(self, coin: str) -> None:
@@ -1250,14 +1261,19 @@ class BotEngine:
         leader_inr_mid = leader.mid * fx
         # gross divergence % vs laggard mid
         gross_pct = (leader_inr_mid - lagg.mid) / lagg.mid * 100.0
-        self.recorder.record(coin, leader.bid, leader.ask, lagg.bid, lagg.ask, fx)
+        now = time.time()
+        slow = now - self._last_slow_ts.get(coin, 0.0) >= 0.4    # 2.5 Hz for recorder/sparkline; scan itself runs faster
+        if slow:
+            self._last_slow_ts[coin] = now
+            self.recorder.record(coin, leader.bid, leader.ask, lagg.bid, lagg.ask, fx)
         basis = self._update_basis(coin, gross_pct)
         adj_pct = gross_pct - basis if self.cfg.basis_filter else gross_pct
         self._last_gross_pct[coin] = gross_pct
         self._last_basis_pct[coin] = basis
         self._last_spread_pct[coin] = adj_pct
-        sp = self._sparkline[coin]; sp.append(adj_pct)
-        if len(sp) > 60: self._sparkline[coin] = sp[-60:]
+        if slow:
+            sp = self._sparkline[coin]; sp.append(adj_pct)
+            if len(sp) > 60: self._sparkline[coin] = sp[-60:]
         self._record_heat(coin, adj_pct)
         lev = max(1, int(self.cfg.leverage))
         liq = self.liquidity(coin, "LONG" if adj_pct >= 0 else "SHORT", self.allocated_per_slot_inr() * lev)
@@ -1272,16 +1288,29 @@ class BotEngine:
             return
 
         hurdle = self.hurdle_pct()
+        side = "LONG" if adj_pct > hurdle else "SHORT" if -adj_pct > hurdle else None
+        if side is None:
+            if coin in self._armed:
+                self._armed.pop(coin)
+                self.spike_stats["reverted"] += 1      # crossed the hurdle but fell back before persisting
+            self._last_signal_state[coin] = "WAITING"
+            return
+        # spike-persistence filter: the dislocation must hold above the hurdle for spike_persist_ms
+        armed = self._armed.get(coin)
+        if not armed or armed[0] != side:
+            self._armed[coin] = (side, now)
+            self.spike_stats["crossings"] += 1
+            self._last_signal_state[coin] = f"ARMING_{side}"
+            return
+        if (now - armed[1]) * 1000 < self.cfg.spike_persist_ms:
+            self._last_signal_state[coin] = f"ARMING_{side}"
+            return
+        self._armed.pop(coin, None)
+        self.spike_stats["persisted"] += 1
         # basis-adjusted catch-up target: leader price net of the persistent offset
         target_ref = leader_inr_mid / (1 + basis / 100.0) if self.cfg.basis_filter else leader_inr_mid
-        if adj_pct > hurdle:
-            self._last_signal_state[coin] = "HURDLE_MET_LONG"
-            await self._open_position(coin, "LONG", leader, lagg, target_ref, basis, adj_pct)
-        elif -adj_pct > hurdle:
-            self._last_signal_state[coin] = "HURDLE_MET_SHORT"
-            await self._open_position(coin, "SHORT", leader, lagg, target_ref, basis, adj_pct)
-        else:
-            self._last_signal_state[coin] = "WAITING"
+        self._last_signal_state[coin] = f"HURDLE_MET_{side}"
+        await self._open_position(coin, side, leader, lagg, target_ref, basis, adj_pct)
 
     # --- basis filter ----------------------------------------------------------
     def _update_basis(self, coin: str, gross_pct: float) -> float:
@@ -1396,6 +1425,8 @@ class BotEngine:
         latency_ms = 0.0
         entry_order_id: Optional[str] = None
         entry_fee_inr = 0.0
+        create_ms: Optional[float] = None
+        fill_confirm_ms: Optional[float] = None
 
         if self.cfg.paper_trading:
             latency_ms = random.uniform(80, 220)
@@ -1429,6 +1460,7 @@ class BotEngine:
                 return
             latency_ms = (time.perf_counter() - t0) * 1000.0
             entry_order_id = fill["order_id"]
+            create_ms, fill_confirm_ms = fill.get("create_ms"), fill.get("fill_latency_ms")
             exec_qty, avg_px, fee_usdt, status = fill["exec_qty"], fill["avg_px"], fill["fee"], fill["status"]
             if exec_qty <= 0 or avg_px <= 0:
                 await self.store.log(
@@ -1463,6 +1495,8 @@ class BotEngine:
             timeout_at=signal_ts + self.cfg.timeout_seconds,
             mode="PAPER" if self.cfg.paper_trading else "LIVE",
             exec_latency_ms=latency_ms,
+            create_ms=create_ms,
+            fill_confirm_ms=fill_confirm_ms,
             entry_order_id=entry_order_id,
             fees_inr=entry_fee_inr,
             leverage=lev,
@@ -1502,7 +1536,8 @@ class BotEngine:
             total = float(o.get("total_quantity") or 0); rem = float(o.get("remaining_quantity") or 0)
             return {"order_id": oid, "exec_qty": max(0.0, total - rem), "avg_px": float(o.get("avg_price") or 0),
                     "fee": float(o.get("fee_amount") or 0), "status": str(o.get("status", "")),
-                    "fill_source": self.coindcx.last_fill_source, "fill_latency_ms": self.coindcx.last_fill_latency_ms}
+                    "fill_source": self.coindcx.last_fill_source, "fill_latency_ms": self.coindcx.last_fill_latency_ms,
+                    "create_ms": self.coindcx.last_create_ms}
         placed = await self.coinswitch.place_order(symbol=f"{coin}USDT", side=side, order_type="MARKET",
                                                    quantity=qty, reduce_only=reduce_only)
         oid = (placed.get("data") or {}).get("order_id")
@@ -1601,6 +1636,8 @@ class BotEngine:
         self.persist()
         self.total_hold_sec += (pos.closed_at - pos.opened_at)
         if pos.exec_latency_ms: self.total_exec_latency_ms += pos.exec_latency_ms
+        if pos.create_ms is not None and pos.fill_confirm_ms is not None:
+            self.total_create_ms += pos.create_ms; self.total_fill_confirm_ms += pos.fill_confirm_ms; self.live_fill_count += 1
         await self.store.close(pos)
         await self.store.log(
             "TRADE",
@@ -1691,9 +1728,17 @@ class BotEngine:
         wr = (self.win_count / self.trade_count * 100.0) if self.trade_count else 0.0
         avg_hold = self.total_hold_sec / self.trade_count if self.trade_count else 0.0
         avg_lat = self.total_exec_latency_ms / self.trade_count if self.trade_count else 0.0
+        n_live = self.live_fill_count
         return {
             "running": self.running,
             "mode": "PAPER" if self.cfg.paper_trading else "LIVE",
+            "avg_create_ms": round(self.total_create_ms / n_live) if n_live else None,
+            "avg_fill_confirm_ms": round(self.total_fill_confirm_ms / n_live) if n_live else None,
+            "live_fill_samples": n_live,
+            "last_create_ms": self.coindcx.last_create_ms if self.coindcx else None,
+            "last_fill_confirm_ms": self.coindcx.last_fill_latency_ms if self.coindcx else None,
+            "spike_filter": {**self.spike_stats, "persist_ms": self.cfg.spike_persist_ms,
+                             "arming": sorted(c for c, s in self._last_signal_state.items() if s.startswith("ARMING"))},
             "started_at": self.started_at,
             "equity_inr": round(self.equity_inr, 2),
             "starting_capital_inr": self.cfg.starting_capital_inr,

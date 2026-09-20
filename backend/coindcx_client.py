@@ -112,7 +112,10 @@ class CoinDCXUserStream:
                         while self._running:
                             if time.time() - last_ping > 20:
                                 await ws.send_str("2"); last_ping = time.time()
-                            msg = await ws.receive(timeout=30)
+                            try:
+                                msg = await ws.receive(timeout=25)
+                            except asyncio.TimeoutError:
+                                continue   # idle channel is normal — the ping above keeps it alive; a dead socket fails on send
                             if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
                                 raise ConnectionError(f"ws closed ({msg.type.name})")
                             if msg.type != aiohttp.WSMsgType.TEXT: continue

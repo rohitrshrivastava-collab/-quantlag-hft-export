@@ -44,7 +44,8 @@ class ShadowExchange:
         self.target_holds: List[float] = []   # signal → target catch-up time (the exploitable lag)
         self.spreads_abs: List[float] = []
         self.signals = self.trades = self.wins = 0
-        self.phantom_skips = self.thin_skips = self.edge_skips = self.shrunk = 0
+        self.phantom_skips = self.thin_skips = self.edge_skips = self.shrunk = self.stale_skips = 0
+        self._armed: Dict[str, tuple] = {}
         self.gross = self.fees = self.net = 0.0
         self.reasons: Dict[str, int] = {}
         self.equity_curve: List[Dict[str, float]] = []
@@ -167,15 +168,24 @@ class ShadowExchange:
             return
         if p: return
 
-        # entry signal
-        if abs(adj) <= hurdle: return
-        direction = "LONG" if adj > 0 else "SHORT"
+        # entry signal (+ spike-persistence: must stay above the hurdle for spike_persist_ms)
+        side = "LONG" if adj > hurdle else "SHORT" if -adj > hurdle else None
+        if side is None:
+            self._armed.pop(coin, None); return
+        armed = self._armed.get(coin)
+        if not armed or armed[0] != side:
+            self._armed[coin] = (side, now); return
+        if (now - armed[1]) * 1000 < cfg.spike_persist_ms: return
+        self._armed.pop(coin, None)
+        direction = side
         self.signals += 1
         notional = slot_notional_inr
         liq = self._liq(feed, coin, direction, notional, fx, cfg, leader_fresh)
         if liq:
             if liq.state in ("PHANTOM", "NO_DEPTH"):
                 self.phantom_skips += 1; return
+            if liq.frozen_s > cfg.max_entry_frozen_s:
+                self.stale_skips += 1; return
             fillable_inr = liq.fillable * fx
             if fillable_inr < notional:
                 if fillable_inr < cfg.min_order_inr:
@@ -227,7 +237,7 @@ class ShadowExchange:
             "slippage_ladder": {str(n): {"median": _median(xs), "p90": _pct(xs, 0.9),
                                          "unfillable_pct": round(sum(1 for x in xs if x >= 100) / len(xs) * 100, 1) if xs else None}
                                 for n, xs in self.ladder.items()},
-            "skips": {"phantom": self.phantom_skips, "thin": self.thin_skips, "edge": self.edge_skips, "shrunk": self.shrunk},
+            "skips": {"phantom": self.phantom_skips, "thin": self.thin_skips, "edge": self.edge_skips, "shrunk": self.shrunk, "stale": self.stale_skips},
             "exit_reasons": self.reasons,
             "feed": {"connected": feed.connected, "subscribed": feed.subscribed, "msgs_per_s": round(feed.msgs_per_s(), 1),
                      "wire_latency_ms": round(feed.wire_latency_ms) if feed.wire_latency_ms is not None else None,

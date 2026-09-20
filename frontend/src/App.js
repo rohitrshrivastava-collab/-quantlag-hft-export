@@ -586,6 +586,8 @@ const stateBadge = (state) => {
     PHANTOM: "bg-fuchsia-950/50 text-fuchsia-300 border-fuchsia-800",
     THIN: "bg-orange-950/50 text-orange-300 border-orange-800",
     STALE_BOOK: "bg-slate-800 text-fuchsia-200 border-fuchsia-900",
+    ARMING_LONG: "bg-emerald-950/30 text-emerald-200 border-emerald-900 border-dashed",
+    ARMING_SHORT: "bg-rose-950/30 text-rose-200 border-rose-900 border-dashed",
   };
   return `inline-flex items-center px-2 py-0.5 rounded-full border font-mono text-[10px] uppercase tracking-wider ${map[state] || map.WAITING}`;
 };
@@ -756,6 +758,7 @@ function Dashboard() {
       phantom_frozen_s: Number(cfgDraft.phantom_frozen_s),
       min_order_inr: Number(cfgDraft.min_order_inr),
       max_entry_frozen_s: Number(cfgDraft.max_entry_frozen_s),
+      spike_persist_ms: Math.round(Number(cfgDraft.spike_persist_ms)),
     });
     setSaving(false);
     pull();
@@ -949,7 +952,11 @@ function Dashboard() {
           <StatCard testId="portfolio-equity-card" label="Total Equity (INR)" value={fmtINR(status?.equity_inr)} sub={`Start ₹${status?.starting_capital_inr?.toLocaleString?.() || "—"}`} accent="cyan" icon={<Wallet className="h-4 w-4 text-cyan-400/60"/>} />
           <StatCard testId="portfolio-free-margin-card" label="Free Margin" value={fmtINR(status?.free_margin_inr)} sub={`₹${status?.allocated_per_slot_inr?.toFixed?.(2) || "0"} / slot · ${status?.num_slots || 10} slots`} accent="slate" icon={<Cpu className="h-4 w-4 text-slate-400/60"/>} />
           <StatCard testId="portfolio-net-pnl-card" label="Net Realized PnL" value={`${(status?.realized_pnl_inr ?? 0) >= 0 ? "+" : ""}${fmtINR(status?.realized_pnl_inr).replace("₹","₹")}`} sub={`W ${status?.wins || 0} / L ${status?.losses || 0} · ${wr.toFixed(1)}% win`} accent={pnlAccent} icon={<TrendingUp className="h-4 w-4 text-emerald-400/60"/>} />
-          <StatCard testId="portfolio-execution-latency-card" label="Exec Latency (avg)" value={`${(status?.avg_exec_latency_ms || 0).toFixed(0)} ms`} sub={`Hurdle gate · ${fmtPct(status?.hurdle_pct)}`} accent="amber" icon={<Timer className="h-4 w-4 text-amber-400/60"/>} />
+          <StatCard testId="portfolio-execution-latency-card" label="Exec Latency (avg)" value={`${(status?.avg_exec_latency_ms || 0).toFixed(0)} ms`}
+            sub={status?.avg_create_ms != null
+              ? <span data-testid="latency-split"><span className="text-amber-200">create {status.avg_create_ms} ms</span> · <span className="text-violet-300">fill-confirm {status.avg_fill_confirm_ms} ms</span> · n={status.live_fill_samples}{status?.last_create_ms != null ? <span className="text-slate-500"> · last {status.last_create_ms}/{status.last_fill_confirm_ms}</span> : null}</span>
+              : <span data-testid="latency-split">{status?.last_create_ms != null ? `last create ${status.last_create_ms} ms · fill ${status.last_fill_confirm_ms ?? "—"} ms · ` : "no live fills yet · "}hurdle {fmtPct(status?.hurdle_pct)}</span>}
+            accent="amber" icon={<Timer className="h-4 w-4 text-amber-400/60"/>} />
         </section>
 
         <FeedHealthStrip feed={telemetry?.feed} />
@@ -1127,6 +1134,7 @@ function Dashboard() {
                   ["phantom_frozen_s", "Phantom after (s)", "config-phantom-frozen-input"],
                   ["min_order_inr", "Shrink floor ₹", "config-min-order-input"],
                   ["max_entry_frozen_s", "Fresh book ≤ (s)", "config-fresh-book-input"],
+                  ["spike_persist_ms", "Spike persist (ms)", "config-spike-persist-input"],
                 ].map(([k, label, tid]) => (
                   <label key={k} className="block">
                     <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">{label}</span>
