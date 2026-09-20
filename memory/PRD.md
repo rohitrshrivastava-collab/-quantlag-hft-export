@@ -174,12 +174,21 @@ SQLite persistence, paper/live toggle.
   preview pod: 35.225.230.28 (will differ on EC2).
 - Testing: `iteration_9.json` backend 7/7, frontend pass (safety gate verified).
 
+### Iteration 10 (2026-06, "CoinDCX LIVE verified")
+- New user keys accepted. Futures margin wallet is INR → client gained
+  `margin_currency` (env `COINDCX_MARGIN_CURRENCY=INR`, auto-detect from
+  wallets) used in orders/positions/leverage/list. Sizing rounds UP to
+  min_notional×1.05 (exchange enforces ₹612 min at its own FX) and checks free
+  margin / leverage. `get_order(id)` + 250 ms polling replaces status scans.
+- REAL round-trip executed once: 75 DOGE buy 0.08476 → sell 0.08475, fees
+  0.0075 USDT, cost ≈ 0.008 USDT, position flat. Leverage-update call works.
+- Testing: `iteration_10.json` backend 8/8, frontend pass (no further orders).
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 
 ## Prioritized backlog
-- P1: CoinDCX keys currently rejected (401) — re-verify after user fixes IP
-  whitelist / permissions; then live-test `_live_market` on Pair B.
+- P1: Pair B LIVE mode dry-run: LAGGARD_EXCHANGE=coindcx + PAPER_TRADING=false with 1 slot, tiny equity; confirm `_live_market` INR sizing end-to-end.
 - P2: Scheduled auto-screening (daily re-rank + Telegram proposal, optional auto-apply).
 - P2: Multi-day replay (concatenate several tick files) and sweep over timeout/stop too.
 - P2: Verify CoinSwitch PRO listing of screener picks via `instrument_info` once keys exist.

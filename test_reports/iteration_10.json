@@ -1,0 +1,26 @@
+{
+  "summary": "Iteration 10: Working-key (VALID INR-margined) verification of CoinDCX Futures endpoints and dashboard. Backend: 8/8 pytest cases passed. Frontend: coindcx-check-btn click renders the exact expected '✓ CoinDCX Futures API reachable · keys valid · wallets: INR 1820.618... , USDT 0.0'. test-order sub-panel initial state: coin=DOGE, size=6, leverage=2, confirm-checkbox unchecked, place-order btn DISABLED. Ticking confirm enables the btn; unticking disables it again. NO real order was placed (never sent confirm=true). Bot stays in PAPER mode; telemetry.feed.source=COINSWITCH_WS; config.coindcx_client_ready=true. 390px viewport: no horizontal overflow (scrollWidth==clientWidth==390).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "BenchmarkPanel select", "issues": ["Pre-existing React hydration warning: <span> inside <option> at App.js line 404 (non-blocking, present in prior iterations)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter10_coindcx_valid.py",
+    "/app/test_reports/pytest/iter10.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "coindcx_test_order still sends a Telegram message on the success path (flagged in iter9). Since keys are now VALID, a future confirm=true would fire Telegram. Consider gating behind a flag or removing per review-request constraint 'Do NOT send Telegram'.",
+    "Wallets API returns balance as string ('1820.618...'). Frontend renders raw string; consider formatting to 2-4 dp for readability."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter10_coindcx_valid.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "CoinDCX keys are VALID INR-margined. /api/coindcx/check returns {ok:true, margin_currency:'INR', wallets:[INR,USDT,...], positions:[..all active_pos=0..], rate_limiter:{default_per_min,buckets,http_429_count}}. INR balance ≈ 1820.61 as of test time. /api/coindcx/test-order validation: confirm=false -> 400, leverage 0/11 -> 422, notional_usdt 0 -> 422. Do NOT send confirm=true in tests (real money). UI safety gate now works: preflight OK + confirm tick required to enable order btn."
+}
