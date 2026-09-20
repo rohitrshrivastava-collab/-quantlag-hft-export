@@ -300,6 +300,21 @@ SQLite persistence, paper/live toggle.
   avoid orphans; fee derived from `taker_fee_rate`; trial watcher idempotent across reloads.
 - User then switched the pair back to CoinDCX (₹1740, 2 slots, 10x) from the dashboard.
 
+### Iteration 18 (2026-06, "Spec compliance audit: top-of-book signals · book-share cap · dynamic stop")
+- Signals now evaluated against the laggard TOP OF BOOK: `long_edge = (BinanceRef − best ask)/ask`,
+  `short_edge = (best bid − BinanceRef)/bid` (BinanceRef = Binance mid, basis-adjusted); LONG fires
+  when long_edge > hurdle, SHORT when short_edge > hurdle; `adj_pct` = 0 while Binance is inside
+  the laggard spread. `/api/spreads[].long_edge_pct/short_edge_pct`; card line "vs ask / vs bid".
+- `max_book_share_pct` (25%): notional ≤ that share of liquidity within depth_bps, combined with
+  the slippage cap (min of both), else shrink/skip.
+- Dynamic stop: `stop_mode` dynamic|fixed; σ of laggard mid (~0.4 s samples over vol_window_s
+  300 s) scaled to the timeout horizon; stop = clamp(vol_k·σ, stop_min_pct 0.15, stop_max_pct 1.0);
+  per-coin `recommended_stop_pct/stop_basis/vol_pct`; `Position.stop_pct/stop_basis`; logged at OPEN.
+- `breakeven_floor` now a toggle (default on); `spike_persist_ms = 0` = execute immediately.
+- Shadow sim mirrors all of the above. Dashboard: stop-mode select, break-even checkbox, 4 inputs.
+- Note: user set timeout_seconds = 10 (spec suggests 30–60).
+- Testing: `iteration_15.json` backend 6/6, frontend pass.
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 

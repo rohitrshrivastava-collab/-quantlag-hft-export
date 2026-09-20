@@ -1,0 +1,19 @@
+{
+  "summary": "Iter15 - top-of-book edges, dynamic volatility stop, book-share cap, breakeven_floor, stop_mode toggle. Backend pytest 6/6 passed. /api/spreads items all have numeric long_edge_pct & short_edge_pct with invariant 'at most one > 0' upheld across all 10 coins; vol_pct number|null; recommended_stop_pct numeric; stop_basis in {dynamic, fixed, fixed (warming up)} and 0.15<=rec_stop<=1.0 when basis=='dynamic'. /api/config defaults verified: stop_mode='dynamic', vol_k=2, stop_min_pct=0.15, stop_max_pct=1.0, max_book_share_pct=25, breakeven_floor=true, vol_window_s=300. PUT {stop_mode:'fixed'}->200 -> all spreads report stop_basis='fixed' and rec_stop==config.stop_loss_pct; PUT {stop_mode:'dynamic'}->200 -> basis returned to dynamic (with 'fixed (warming up)' allowed during warmup). PUT {stop_mode:'banana'}->422. PUT {vol_k:3, max_book_share_pct:40}->200 GET reflects; restored to 2 / 25. /api/positions/closed?limit=3 items include stop_pct & stop_basis keys. /api/compare returns exchanges={coinswitch,coindcx} (both laggards vs Binance leader) each with verdict. Frontend 1920: stop-mode-select value='dynamic'; breakeven-floor-checkbox checked; config-book-share-input=25, config-vol-k-input=2, config-stop-min-input=0.15, config-stop-max-input=1; 10 spread-edges-* cards each containing 'vs ask', 'vs bid', 'stop'; 10 spread-stop-* cards showing percentages. 390px: scrollWidth==clientWidth==390, no horizontal overflow. No restricted endpoints were called; bot left LIVE with stop_mode=dynamic, vol_k=2, max_book_share_pct=25.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/test_backend_iter15.py", "/app/test_reports/pytest/iter15.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "/api/compare exchange keys are 'coinswitch' and 'coindcx' (Binance is the reference leader, not listed as an exchange). Consider documenting this in the endpoint response schema - the request phrasing 'both exchanges' could mislead future testers into asserting 'binance' presence.",
+    "spread cards show 'vs ask -0.000%' with 3-decimal precision when values are effectively zero - visually noisy. Consider showing '~0%' or hiding sign when |value|<0.001%."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter15.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a - CoinDCX keys are REAL MONEY LIVE, read-only testing only.",
+  "seed_data_creation": "none - only reversible config round-trips (stop_mode fixed<->dynamic, vol_k 2<->3, max_book_share_pct 25<->40); final state restored to spec defaults.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Bot LIVE on CoinDCX; final config stop_mode=dynamic, vol_k=2, max_book_share_pct=25, breakeven_floor=true, stop_min_pct=0.15, stop_max_pct=1.0. /api/spreads and /api/positions/closed use {items:[...]} envelope. /api/compare exchanges keys are 'coinswitch','coindcx' (Binance is the leader/reference, not an exchange entry). stop_basis enum: {'dynamic','fixed','fixed (warming up)'}. Do NOT write to /api/bot/mode, /api/bot/stop, /api/account, /api/laggard, /api/coins/*, /api/universe, /api/compare/reset, /api/coindcx/test-order, /api/coinswitch/*, /api/telegram/*.",
+  "rca of the issue": "n/a - all tests pass"
+}
