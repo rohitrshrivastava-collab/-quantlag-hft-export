@@ -315,7 +315,27 @@ SQLite persistence, paper/live toggle.
 - Note: user set timeout_seconds = 10 (spec suggests 30–60).
 - Testing: `iteration_15.json` backend 6/6, frontend pass.
 
-## Current data files (DATA_DIR, default /app/data)
+### Iteration 19 (2026-06, "Dynamic coin universe · Max-price filter · Exact-formula hurdle")
+- `screener.build_universe()`: live shortlist from CoinDCX public futures RT feed (last, 24h
+  quote volume, 24h range→volatility) ∩ Binance perps (exchangeInfo, fallback list). Filters:
+  both-exchanges, volume ≥ `universe_min_volume_usdt` (5M), volatility ≥ `universe_min_vol_pct`
+  (1%), price ≤ `max_coin_price_usd` (0 = no cap). Ranked by volatility; hysteresis keeps
+  currently-tracked coins that still qualify, fills freed slots with highest-vol newcomers.
+- `universe_watcher` (server.py, every `universe_refresh_s`=60s): rebuilds & applies via
+  `set_coins` when `auto_universe` on, bot running, and NO open positions (swap restarts feeds,
+  never mid-trade). Standalone task (survives set_coins stop/start). `GET /api/universe/auto`.
+- New config (persisted, PUT /api/config, GET /api/config, env): `auto_universe` (True),
+  `max_coin_price_usd` (0), `universe_min_volume_usdt`, `universe_min_vol_pct`, `universe_refresh_s`.
+- Dashboard: `auto-universe-block` in Signal & Risk panel — `auto-universe-checkbox`,
+  `config-max-coin-price-input`, and `auto-universe-coins` ("Tracking: …") line. "Extra Hurdle %"
+  relabelled "Break-even margin %".
+- ENTRY GATE TIGHTENED: `hurdle_pct()` = entry_fee + exit_fee + slippage_buffer ONLY
+  (dropped `hurdle_extra_pct`, so 0.13% at current settings, was 0.30%). `dynamic_hurdle_pct`
+  likewise. `hurdle_extra_pct` (0.17) now only feeds the break-even floor (target still ≥
+  entry + fees + 0.17%). This materially increases live trade frequency at a lower edge — by design.
+- Testing: `iteration_16.json` frontend 5/5 pass (backend verified via curl). Bot was LIVE
+  (CoinDCX, 4 slots, 5x) throughout — testing was non-destructive.
+
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 
 ## Prioritized backlog

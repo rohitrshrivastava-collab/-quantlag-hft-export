@@ -1,0 +1,37 @@
+{
+  "summary": "Frontend-only verification of Auto-universe block, Max Coin Price persistence, and hurdle_pct formula. All 5 requested checks passed. Left final state: max_coin_price_usd=0, auto_universe=true (checkbox checked).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "verification_details": {
+    "auto_universe_block_present": true,
+    "auto_universe_checkbox_initially_checked": true,
+    "config_max_coin_price_input_present": true,
+    "auto_universe_coins_present": "Tracking: ENA, AVAX, XRP, SUI",
+    "config_save_settings_btn_present": true,
+    "set_to_2_persisted": "GET /api/config max_coin_price_usd=2 after save",
+    "reset_to_0_persisted": "GET /api/config max_coin_price_usd=0 after final save",
+    "final_checkbox_checked": true,
+    "universe_auto_endpoint_keys_include_all_required": true,
+    "universe_auto_sample": {"auto_universe": true, "coins": ["ENA","AVAX","XRP","SUI"], "selected": ["ENA","AVAX","XRP","SUI"], "num_slots": 4, "max_coin_price_usd": 2, "refresh_s": 60},
+    "hurdle_pct": 0.13,
+    "entry_taker_fee_pct": 0.05,
+    "exit_taker_fee_pct": 0.05,
+    "slippage_buffer_pct": 0.03,
+    "hurdle_extra_pct": 0.17,
+    "hurdle_equals_entry_plus_exit_plus_slippage": true,
+    "hurdle_excludes_extra": true
+  },
+  "test_report_links": [],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (skipped per request)", "frontend": "100%"},
+  "seed_data_creation": "None",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Live bot dashboard - do not toggle MODE/PAIR/START/CLOSE/Apply Account Settings. Only Max Coin Price + Save Settings mutations are allowed. Final state left at max_coin_price_usd=0, auto_universe=true."
+}
