@@ -228,6 +228,23 @@ SQLite persistence, paper/live toggle.
   SlotTooSmall (₹150 slot < exchange min ≈ ₹600) so no real orders fire.
 - Testing: `iteration_12.json` backend 9/9, frontend pass (1920 + 390 px).
 
+### Iteration 13 (2026-06, "Pair switch button · Wallet balance · LIVE ₹1800@10x · FX-consistent marking")
+- `POST /api/laggard {exchange}` → `BotEngine.set_laggard_exchange` (409 with open
+  positions; restarts feeds + user stream; pushes leverage in LIVE; persisted via
+  `laggard_exchange` in settings.json). Header `pair-toggle` button + banner message.
+- `GET /api/wallet` (10 s cache, `?force=true`) → active exchange futures wallet; header
+  `wallet-balance-chip` + Account panel `account-wallet-row`. CoinSwitch shows "no keys".
+- User went LIVE on CoinDCX: equity ₹1800, 10 slots, 10x (leverage pushed to all 10 coins,
+  no errors). Real 10x trades executing (~₹1.5–2.5k notional, fills via WS 0.6–0.9 s,
+  create+fill 1.1–2.0 s). Net still fee-negative at 0.15% hurdle (see §5 findings).
+- Bug fixed: FX blend jumped ±1.4% when a source went stale → fake STOP_LOSS (NEAR −₹11.19
+  on a flat USDT trade). Now `FXRateService` prefers CoinDCX USDT/INR; `Position.entry_fx`
+  pins the booking rate; `_manage_position`/`_close_position` mark in the entry-FX frame.
+- Break-even target floor: target ≥ entry × (1 + fees + extra) for LONG (mirror for SHORT)
+  so TARGET_HIT can no longer close below cost (also in shadow sim).
+- Shadow sim books at a pinned fx0.
+- Testing: `iteration_13.json` backend 7/7, frontend pass; pair round-trip verified live.
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 

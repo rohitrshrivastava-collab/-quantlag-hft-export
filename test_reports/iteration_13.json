@@ -1,0 +1,23 @@
+{
+  "summary": "Iter13 - runtime pair switch (/api/laggard), /api/wallet cache, entry_fx on closed positions, and header/account UI. Backend pytest 7/7 passed against REACT_APP_BACKEND_URL. /api/status: leverage=10, num_slots=10, laggard='coindcx', mode='LIVE', running=true. /api/wallet: exchange='coindcx', keys=true, error=null, margin_currency='INR', balances includes INR (₹1647.23, locked 153.57) & USDT; 2nd call within 1s returned identical fetched_at (cache hit), ?force=true refreshed fetched_at. /api/laggard {'foo'} -> 400, {'coindcx'} -> 200 ok/no change. Round-trip executed (0 open positions at that moment): POST coinswitch -> 200 warning='COINSWITCH keys not configured...', ~6s later telemetry.feed.source=COINSWITCH_WS & laggard_exchange=coinswitch, /api/wallet exchange=coinswitch keys=false. Immediately switched back to coindcx -> 200; within 8s telemetry.feed.source=COINDCX_WS with user_ws.joined=true and /api/status back to laggard='coindcx', running=true, mode='LIVE'. /api/positions/closed?limit=5 items include numeric entry_fx (mostly 0.0 for older LIVE trades). /api/config exposes laggard_exchange/leverage/num_slots/paper_trading. Frontend 1920px: header shows wallet-balance-chip 'COINDCX WALLET · ₹1,647.23', pair-toggle 'PAIR · BINANCE→COINDCX', leverage-slots-badge '10x · 10 slots' (CSS uppercased to '10X · 10 SLOTS'), paper-live-mode-toggle 'MODE · LIVE', subtitle 'Binance → CoinDCX Futures · Lead-Lag Arb' present in DOM (App.js:910). Account Controls panel shows account-wallet-row with 'INR ₹1,647.23 · locked ₹153.57' and account-wallet-INR element rendered. 390px viewport: scrollWidth==clientWidth==390 (no horizontal overflow), wallet-balance-chip and pair-toggle both visible. No writes performed to /api/bot/mode, /api/account, /api/coindcx/test-order, /api/telegram/*, /api/compare/reset. Bot left running LIVE on CoinDCX per user's setup.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter13.py",
+    "/app/test_reports/pytest/iter13.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Wallet cache key is only busted on laggard flip via manual `WALLET_CACHE['ts']=0.0` reset in /api/laggard; the same reset should happen if API keys are hot-reloaded from env. Currently a stale 10s wallet snapshot can outlive a key change.",
+    "entry_fx defaults to 0 for legacy Position rows in /api/positions/closed. Consider serializing as null when unset so downstream FX-consistent PnL displays can distinguish 'no FX captured' from a true zero rate.",
+    "Round-trip switch to coinswitch produced a valid warning but /api/wallet still returned a shaped response with keys:false and empty balances - good UX; ensure the frontend WalletChip degrades cleanly when balances[] is empty (currently shows '—' fine)."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter13.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a - no auth. CoinDCX keys in backend/.env are REAL MONEY LIVE.",
+  "seed_data_creation": "none - only guarded pair round-trip (coinswitch -> coindcx) as instructed.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Bot is LIVE on CoinDCX (₹1800 baseline, 10 slots, 10x). /api/laggard is idempotent for the current exchange (returns 200 no-op) and 409 when positions are open. /api/wallet cache TTL is 10s; use ?force=true to bypass. entry_fx is serialized on all Position rows (may be 0 for legacy). Header text uses CSS uppercase transform - use inner_text() (rendered) or case-insensitive matching when asserting badge strings. Do NOT touch mode/account/pair via UI clicks; API-only round-trips are safe when positions=0. Bot left running LIVE on CoinDCX at end of run.",
+  "rca of the issue": "n/a - all tests pass"
+}
