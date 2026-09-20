@@ -10,7 +10,8 @@ CFG_KEYS = ("num_slots", "leverage", "starting_capital_inr", "paper_trading", "b
             "entry_taker_fee_pct", "exit_taker_fee_pct", "slippage_buffer_pct", "hurdle_extra_pct",
             "timeout_seconds", "stop_loss_pct", "coins", "max_slippage_pct", "phantom_frozen_s", "min_order_inr",
             "laggard_exchange", "max_entry_frozen_s", "spike_persist_ms", "max_book_share_pct", "stop_mode",
-            "vol_window_s", "vol_k", "stop_min_pct", "stop_max_pct", "breakeven_floor")
+            "vol_window_s", "vol_k", "stop_min_pct", "stop_max_pct", "breakeven_floor",
+            "auto_universe", "max_coin_price_usd")
 STATE_KEYS = ("equity_inr", "realized_pnl_inr", "trade_count", "win_count", "loss_count",
               "total_hold_sec", "total_exec_latency_ms")
 

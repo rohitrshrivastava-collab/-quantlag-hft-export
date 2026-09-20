@@ -29,7 +29,7 @@ from starlette.middleware.cors import CORSMiddleware
 from bot_engine import BotConfig, BotEngine
 from coindcx_client import CoinDCXError
 from replay import replay_session, replay_sweep
-from screener import screen
+from screener import screen, build_universe
 from shadow import ShadowRunner
 from verdict import evaluate as evaluate_verdict
 
@@ -61,10 +61,12 @@ async def lifespan(app: FastAPI):
     await ENGINE.start()
     await SHADOW.start()
     trial_task = asyncio.create_task(coinswitch_trial_watcher())
+    universe_task = asyncio.create_task(universe_watcher())
     try:
         yield
     finally:
         trial_task.cancel()
+        universe_task.cancel()
         await ENGINE.stop()
         mongo_client.close()
 
@@ -99,6 +101,8 @@ class ConfigUpdate(BaseModel):
     stop_min_pct: Optional[float] = Field(default=None, ge=0.05, le=5)
     stop_max_pct: Optional[float] = Field(default=None, ge=0.1, le=10)
     breakeven_floor: Optional[bool] = None
+    auto_universe: Optional[bool] = None
+    max_coin_price_usd: Optional[float] = Field(default=None, ge=0, le=1e9)
 
 
 class AccountUpdate(BaseModel):
@@ -206,6 +210,52 @@ async def coinswitch_trial():
     return {**TRIAL, "laggard_exchange": ENGINE.cfg.laggard_exchange, "mode": "PAPER" if ENGINE.cfg.paper_trading else "LIVE"}
 
 
+UNIVERSE: Dict[str, Any] = {"last": None, "selected": None, "applied_at": None, "error": None, "runs": 0}
+
+
+async def universe_watcher() -> None:
+    """Continuously rebuild the traded shortlist (liquidity × volatility × max-price, both exchanges).
+
+    Runs only while the bot is live, auto-universe is on, and no positions are open
+    (swapping the universe restarts feeds, so we never do it mid-trade)."""
+    await asyncio.sleep(5)  # let feeds warm up before the first rebuild
+    while True:
+        delay = 60
+        try:
+            c = ENGINE.cfg
+            delay = max(20, int(c.universe_refresh_s))
+            if c.auto_universe and ENGINE.running and not await ENGINE.store.all_open():
+                res = await build_universe(
+                    laggard=c.laggard_exchange, top_n=max(1, c.num_slots),
+                    max_price_usd=c.max_coin_price_usd,
+                    min_volume_usdt=c.universe_min_volume_usdt,
+                    min_vol_pct=c.universe_min_vol_pct,
+                    keep=list(c.coins))
+                UNIVERSE.update(last=res, error=None, runs=UNIVERSE["runs"] + 1)
+                sel = res.get("selected") or []
+                if sel and set(sel) != set(c.coins):
+                    try:
+                        await ENGINE.set_coins(sel)
+                        UNIVERSE.update(selected=sel, applied_at=time.time())
+                        await ENGINE.store.log("INFO", f"Auto-universe → {len(sel)} coins: {', '.join(sel)}")
+                    except RuntimeError:
+                        pass  # a position opened between the check and the swap; try next cycle
+                else:
+                    UNIVERSE["selected"] = list(c.coins)
+        except Exception as e:
+            UNIVERSE["error"] = str(e)
+        await asyncio.sleep(delay)
+
+
+@api.get("/universe/auto")
+async def universe_auto():
+    c = ENGINE.cfg
+    return {"auto_universe": c.auto_universe, "coins": c.coins, "num_slots": c.num_slots,
+            "max_coin_price_usd": c.max_coin_price_usd,
+            "min_volume_usdt": c.universe_min_volume_usdt, "min_vol_pct": c.universe_min_vol_pct,
+            "refresh_s": c.universe_refresh_s, **UNIVERSE}
+
+
 @api.get("/wallet")
 async def wallet(force: bool = False):
     """Futures wallet of the active pair's laggard exchange, cached 10 s to respect rate limits."""
@@ -251,6 +301,10 @@ async def get_config():
         "stop_max_pct": c.stop_max_pct,
         "breakeven_floor": c.breakeven_floor,
         "depth_bps": c.depth_bps,
+        "auto_universe": c.auto_universe,
+        "max_coin_price_usd": c.max_coin_price_usd,
+        "universe_min_volume_usdt": c.universe_min_volume_usdt,
+        "universe_min_vol_pct": c.universe_min_vol_pct,
     }
 
 

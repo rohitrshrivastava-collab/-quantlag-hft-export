@@ -24,7 +24,11 @@ STABLES = {"USDT", "USDC", "BUSD", "DAI", "FDUSD", "TUSD"}
 
 
 async def coindcx_futures_universe(session: aiohttp.ClientSession) -> Dict[str, Dict[str, Any]]:
-    """{coin: {volume_24h_usdt, last, pair}} for CoinDCX USDT-margined futures."""
+    """{coin: {volume_24h_usdt, last, vol_pct, pair}} for CoinDCX USDT-margined futures.
+
+    CoinDCX public RT feed carries per-pair `ls` (last), `v` (24h quote volume),
+    `h`/`l` (24h high/low) and `pc` (24h change %). We derive a short-term
+    volatility proxy = 24h price range / last (falls back to |pc|)."""
     out: Dict[str, Dict[str, Any]] = {}
     async with session.get("https://public.coindcx.com/market_data/v3/current_prices/futures/rt") as r:
         d = await r.json(content_type=None)
@@ -34,11 +38,53 @@ async def coindcx_futures_universe(session: aiohttp.ClientSession) -> Dict[str, 
         if coin in STABLES or coin.startswith("1000"): continue
         try:
             last = float(p.get("ls") or 0); vol = float(p.get("v") or 0)
+            hi = float(p.get("h") or 0); lo = float(p.get("l") or 0); pc = float(p.get("pc") or 0)
         except (TypeError, ValueError):
             continue
         if last <= 0: continue
-        out[coin] = {"pair": pair, "last": last, "volume_24h_usdt": vol}  # `v` is 24h quote (USDT) volume
+        vol_pct = (hi - lo) / last * 100.0 if hi > 0 and lo > 0 and hi >= lo else abs(pc)
+        out[coin] = {"pair": pair, "last": last, "volume_24h_usdt": vol, "vol_pct": round(vol_pct, 3)}
     return out
+
+
+async def build_universe(*, laggard: str, top_n: int, max_price_usd: float = 0.0,
+                         min_volume_usdt: float = 5e6, min_vol_pct: float = 1.0,
+                         keep: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Live shortlist of the best-suited pairs for lag-arb.
+
+    Filters (all must pass): listed on Binance perps AND the active laggard,
+    24h quote volume ≥ min_volume_usdt, short-term volatility ≥ min_vol_pct,
+    and (if max_price_usd>0) live price ≤ max_price_usd. Survivors are ranked by
+    volatility (strongest lag-arb edge). `keep` (currently-tracked coins that still
+    qualify) are held to reduce churn; freed slots are filled by the highest-vol
+    newcomers. Returns up to `top_n` coins."""
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as s:
+        market = await coindcx_futures_universe(s)
+        bn = await binance_perps(s)
+    binance_source = "binance_exchangeInfo" if bn else "fallback_list"
+    bn = bn or BINANCE_PERPS_FALLBACK
+    keep_set = {c.upper() for c in (keep or [])}
+    rows: List[Dict[str, Any]] = []
+    for coin, v in market.items():
+        on_both = coin in bn
+        vol_ok = v["volume_24h_usdt"] >= min_volume_usdt
+        volp_ok = v["vol_pct"] >= min_vol_pct
+        price_ok = (max_price_usd <= 0) or (v["last"] <= max_price_usd)
+        qualifies = on_both and vol_ok and volp_ok and price_ok
+        rows.append({"coin": coin, "last": v["last"], "volume_24h_usdt": round(v["volume_24h_usdt"], 0),
+                     "vol_pct": v["vol_pct"], "on_both": on_both, "vol_ok": vol_ok,
+                     "volp_ok": volp_ok, "price_ok": price_ok, "qualifies": qualifies})
+    qualified = sorted((r for r in rows if r["qualifies"]), key=lambda r: r["vol_pct"], reverse=True)
+    top_n = max(1, top_n)
+    kept = [r["coin"] for r in qualified if r["coin"] in keep_set]
+    fresh = [r["coin"] for r in qualified if r["coin"] not in keep_set]
+    selected = (kept + fresh)[:top_n]
+    rows.sort(key=lambda r: (r["qualifies"], r["vol_pct"]), reverse=True)
+    return {"selected": selected, "laggard": laggard, "top_n": top_n,
+            "candidates": len(rows), "qualified": len(qualified),
+            "binance_source": binance_source, "coindcx_instruments": len(market),
+            "min_volume_usdt": min_volume_usdt, "min_vol_pct": min_vol_pct,
+            "max_price_usd": max_price_usd, "rows": rows[:60]}
 
 
 async def binance_perps(session: aiohttp.ClientSession) -> Optional[set]:

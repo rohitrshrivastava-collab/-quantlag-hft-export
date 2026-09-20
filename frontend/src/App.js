@@ -772,6 +772,8 @@ function Dashboard() {
       stop_max_pct: Number(cfgDraft.stop_max_pct),
       stop_mode: cfgDraft.stop_mode,
       breakeven_floor: !!cfgDraft.breakeven_floor,
+      auto_universe: !!cfgDraft.auto_universe,
+      max_coin_price_usd: Number(cfgDraft.max_coin_price_usd) || 0,
     });
     setSaving(false);
     pull();
@@ -874,7 +876,7 @@ function Dashboard() {
     pull();
   };
   const [hurdleSim, setHurdleSim] = useState(null);
-  const draftHurdle = cfgDraft ? ["entry_taker_fee_pct", "exit_taker_fee_pct", "slippage_buffer_pct", "hurdle_extra_pct"].reduce((a, k) => a + (Number(cfgDraft[k]) || 0), 0) : null;
+  const draftHurdle = cfgDraft ? ["entry_taker_fee_pct", "exit_taker_fee_pct", "slippage_buffer_pct"].reduce((a, k) => a + (Number(cfgDraft[k]) || 0), 0) : null;
   useEffect(() => {
     if (!draftHurdle || draftHurdle <= 0) return;
     let alive = true;
@@ -1141,6 +1143,24 @@ function Dashboard() {
           <div data-testid="bot-config-controls-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
             <h3 className="font-semibold text-slate-200 mb-4" style={{fontFamily:"Outfit, sans-serif"}}>Signal & Risk Parameters</h3>
             {cfgDraft && (
+              <div data-testid="auto-universe-block" className="mb-3 rounded border border-cyan-900/50 bg-cyan-950/10 px-3 py-2.5">
+                <label data-testid="auto-universe-toggle" className="flex items-center justify-between gap-3 text-xs">
+                  <span className="font-mono text-slate-200">Auto coin selection <span className="text-slate-500">· picks {config?.num_slots ?? status?.num_slots ?? 10} best pairs by liquidity × volatility, both exchanges</span></span>
+                  <input data-testid="auto-universe-checkbox" type="checkbox" checked={!!cfgDraft.auto_universe} onChange={(e) => setCfgDraft({ ...cfgDraft, auto_universe: e.target.checked })} className="h-4 w-4 accent-cyan-500" />
+                </label>
+                <label className="mt-2.5 flex items-center justify-between gap-3 text-xs">
+                  <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Max Coin Price (USD) <span className="normal-case tracking-normal text-slate-600">· 0 = no cap</span></span>
+                  <input data-testid="config-max-coin-price-input" type="number" step="0.01" min="0" placeholder="0" value={cfgDraft.max_coin_price_usd ?? 0} onChange={(e) => setCfgDraft({ ...cfgDraft, max_coin_price_usd: e.target.value })}
+                    className="w-28 bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-right focus:outline-none focus:border-cyan-600 focus:ring-1 focus:ring-cyan-800"/>
+                </label>
+                {config?.coins && (
+                  <div data-testid="auto-universe-coins" className="mt-2 text-[10px] font-mono text-slate-400 leading-relaxed">
+                    Tracking: <span className="text-cyan-300">{config.coins.join(", ")}</span>
+                  </div>
+                )}
+              </div>
+            )}
+            {cfgDraft && (
               <label data-testid="basis-filter-toggle" className="mb-3 flex items-center justify-between gap-3 rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2 text-xs">
                 <span className="font-mono text-slate-300">Basis filter <span className="text-slate-500">· subtract rolling {cfgDraft.basis_window_s || 300}s median offset</span></span>
                 <input data-testid="basis-filter-checkbox" type="checkbox" checked={!!cfgDraft.basis_filter} onChange={(e) => setCfgDraft({ ...cfgDraft, basis_filter: e.target.checked })} className="h-4 w-4 accent-purple-500" />
@@ -1167,7 +1187,7 @@ function Dashboard() {
                   ["entry_taker_fee_pct", "Entry Fee %", "config-fee-percentage-input"],
                   ["exit_taker_fee_pct", "Exit Fee %"],
                   ["slippage_buffer_pct", "Slippage %"],
-                  ["hurdle_extra_pct", "Extra Hurdle %", "config-hurdle-gate-input"],
+                  ["hurdle_extra_pct", "Break-even margin %", "config-hurdle-gate-input"],
                   ["timeout_seconds", "Timeout (s)", "config-timeout-window-input"],
                   ["stop_loss_pct", "Stop Loss %"],
                   ["max_slippage_pct", "Max RT Slippage %", "config-max-slippage-input"],
