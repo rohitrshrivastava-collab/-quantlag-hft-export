@@ -9,8 +9,10 @@ import csv
 import io
 import json
 import logging
+import math
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -188,6 +190,73 @@ async def coindcx_check():
     await ENGINE.store.log("INFO", "CoinDCX preflight OK — wallet reachable")
     return {"ok": True, "wallets": wallets, "positions": positions if isinstance(positions, list) else positions,
             "rate_limiter": ENGINE.coindcx.limiter_stats()}
+
+
+class CoinDCXTestOrder(BaseModel):
+    coin: str = "DOGE"
+    notional_usdt: float = Field(default=6.0, ge=1, le=50)
+    confirm: bool = False
+
+
+@api.post("/coindcx/test-order")
+async def coindcx_test_order(body: CoinDCXTestOrder):
+    """Tiny round-trip on Pair B: market BUY then immediate reduce-only market SELL. Real money — requires confirm."""
+    if ENGINE.coindcx is None:
+        raise HTTPException(status_code=400, detail="CoinDCX keys not configured")
+    if not body.confirm:
+        raise HTTPException(status_code=400, detail="set confirm=true — this places REAL orders on CoinDCX Futures")
+    coin = body.coin.upper()
+    c = ENGINE.coindcx
+    steps: List[Dict[str, Any]] = []
+    try:
+        wallets = await c.wallet_balance()
+        steps.append({"step": "wallet", "ok": True, "data": wallets if isinstance(wallets, list) else [wallets]})
+        inst = await c.instrument(coin)
+        px = await c.last_price(coin)
+        if px <= 0: raise HTTPException(status_code=424, detail=f"no CoinDCX price for {coin}")
+        min_notional = float(inst.get("min_notional") or 6)
+        notional = max(body.notional_usdt, min_notional)
+        step = float(inst.get("quantity_increment") or 1e-6)
+        qty = math.floor((notional / px) / step) * step
+        qty = max(qty, float(inst.get("min_quantity") or step))
+        qty = float(f"{qty:.10g}")
+        steps.append({"step": "sizing", "ok": True, "price": px, "qty": qty, "notional_usdt": round(qty * px, 4),
+                      "min_notional": min_notional, "taker_fee": inst.get("taker_fee"), "quantity_increment": step})
+        try:
+            await c.update_leverage(coin, 1)
+            steps.append({"step": "leverage", "ok": True, "leverage": 1})
+        except CoinDCXError as e:
+            steps.append({"step": "leverage", "ok": False, "error": f"{e.status}: {e.body}"})
+        t0 = time.perf_counter()
+        opened = await c.market_order(coin, "buy", qty, 1)
+        oid = str(opened.get("id") or "")
+        fill = await c.wait_for_fill(oid, "buy", timeout_s=6) or opened
+        steps.append({"step": "buy", "ok": True, "order_id": oid, "status": fill.get("status"), "avg_price": fill.get("avg_price"),
+                      "fee": fill.get("fee_amount"), "latency_ms": round((time.perf_counter() - t0) * 1000)})
+        t1 = time.perf_counter()
+        closed = await c.market_order(coin, "sell", qty, 1)
+        cid = str(closed.get("id") or "")
+        cfill = await c.wait_for_fill(cid, "sell", timeout_s=6) or closed
+        steps.append({"step": "sell_close", "ok": True, "order_id": cid, "status": cfill.get("status"), "avg_price": cfill.get("avg_price"),
+                      "fee": cfill.get("fee_amount"), "latency_ms": round((time.perf_counter() - t1) * 1000)})
+        positions = await c.positions([c.pair(coin)])
+        flat = all(float(p.get("active_pos") or 0) == 0 for p in (positions if isinstance(positions, list) else []))
+        steps.append({"step": "verify_flat", "ok": flat, "positions": positions})
+    except CoinDCXError as e:
+        steps.append({"step": "error", "ok": False, "error": f"CoinDCX API {e.status}: {e.body}"})
+        await ENGINE.store.log("ERROR", f"CoinDCX test order failed at step {len(steps)}: {e.status} {e.body}")
+        raise HTTPException(status_code=424, detail={"message": f"CoinDCX API {e.status}: {e.body}", "steps": steps})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=424, detail={"message": f"test order failed: {e}", "steps": steps})
+    buy_px = float(steps[3].get("avg_price") or 0) if len(steps) > 3 else 0
+    sell_px = float(steps[4].get("avg_price") or 0) if len(steps) > 4 else 0
+    fees = sum(float(s.get("fee") or 0) for s in steps if s["step"] in ("buy", "sell_close"))
+    cost = round((buy_px - sell_px) * qty + fees, 6) if buy_px and sell_px else None
+    await ENGINE.store.log("TRADE", f"[COINDCX TEST] {coin} round-trip qty={qty} buy={buy_px} sell={sell_px} fees={fees} USDT cost≈{cost}")
+    await ENGINE.telegram.send(f"🧪 <b>CoinDCX test order</b> {coin}\nqty {qty} · buy {buy_px} → sell {sell_px}\nfees {fees} USDT · round-trip cost ≈ {cost} USDT\nflat: {'yes' if steps[-1].get('ok') else 'CHECK POSITION'}")
+    return {"ok": True, "coin": coin, "qty": qty, "round_trip_cost_usdt": cost, "flat": steps[-1].get("ok"), "steps": steps}
 
 
 class ReplayRequest(BaseModel):

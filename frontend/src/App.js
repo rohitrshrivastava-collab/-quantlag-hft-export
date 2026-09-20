@@ -663,6 +663,18 @@ function Dashboard() {
     setReplayRunning(false);
   };
   const [dcxCheck, setDcxCheck] = useState(null);
+  const [dcxTest, setDcxTest] = useState({ coin: "DOGE", notional_usdt: 6, confirm: false, loading: false, result: null });
+  const runDcxTestOrder = async () => {
+    setDcxTest((t) => ({ ...t, loading: true, result: null }));
+    try {
+      const r = await axios.post(`${API}/coindcx/test-order`, { coin: dcxTest.coin, notional_usdt: Number(dcxTest.notional_usdt), confirm: dcxTest.confirm });
+      setDcxTest((t) => ({ ...t, loading: false, result: r.data }));
+    } catch (e) {
+      const d = e.response?.data?.detail;
+      setDcxTest((t) => ({ ...t, loading: false, result: { ok: false, error: typeof d === "object" ? d.message : (d || e.message), steps: typeof d === "object" ? d.steps : [] } }));
+    }
+    pull();
+  };
   const [sweep, setSweep] = useState(null);
   const [sweepRunning, setSweepRunning] = useState(false);
   const runSweep = async (body) => {
@@ -995,9 +1007,24 @@ function Dashboard() {
               </div>
               {dcxCheck && (
                 <div data-testid="coindcx-check-result" className={`mt-2 text-[11px] font-mono rounded border px-2 py-1.5 break-words ${dcxCheck.loading ? "border-slate-700 text-slate-400" : dcxCheck.ok ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>
-                  {dcxCheck.loading ? "Calling futures wallets…" : dcxCheck.ok ? "✓ CoinDCX Futures API reachable · keys valid" : `✗ ${dcxCheck.error}`}
+                  {dcxCheck.loading ? "Calling futures wallets…" : dcxCheck.ok ? `✓ CoinDCX Futures API reachable · keys valid · wallets: ${(dcxCheck.data.wallets || []).map((w) => `${w.currency_short_name || w.currency || "USDT"} ${w.balance ?? ""}`).join(", ") || "n/a"}` : `✗ ${dcxCheck.error}`}
                 </div>
               )}
+              <div data-testid="coindcx-test-order-panel" className="mt-3 rounded border border-[#1E2638] bg-[#0A0D12] p-3">
+                <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono mb-2">Pair B test order · market BUY → reduce-only SELL (real money)</div>
+                <div className="grid grid-cols-3 gap-2 text-xs">
+                  <label className="block"><span className="text-[10px] text-slate-500 font-mono">Coin</span><input data-testid="coindcx-test-coin-input" value={dcxTest.coin} onChange={(e) => setDcxTest({ ...dcxTest, coin: e.target.value.toUpperCase() })} className="mt-1 w-full bg-[#121721] border border-[#1E2638] rounded px-2 py-1 font-mono text-slate-100 text-xs"/></label>
+                  <label className="block"><span className="text-[10px] text-slate-500 font-mono">Size USDT (≥6)</span><input data-testid="coindcx-test-size-input" type="number" min="1" max="50" step="1" value={dcxTest.notional_usdt} onChange={(e) => setDcxTest({ ...dcxTest, notional_usdt: e.target.value })} className="mt-1 w-full bg-[#121721] border border-[#1E2638] rounded px-2 py-1 font-mono text-slate-100 text-xs"/></label>
+                  <label className="flex items-end gap-2 pb-1 text-[10px] font-mono text-slate-400"><input data-testid="coindcx-test-confirm-checkbox" type="checkbox" checked={dcxTest.confirm} onChange={(e) => setDcxTest({ ...dcxTest, confirm: e.target.checked })} className="h-4 w-4 accent-rose-500"/> I understand this trades real funds</label>
+                </div>
+                <button data-testid="coindcx-test-order-btn" onClick={runDcxTestOrder} disabled={!dcxCheck?.ok || !dcxTest.confirm || dcxTest.loading} title={!dcxCheck?.ok ? "run Check CoinDCX first" : ""} className="mt-2 w-full py-1.5 rounded-full text-[10px] font-bold uppercase tracking-widest bg-rose-700 hover:bg-rose-600 text-white transition-colors duration-150 disabled:opacity-40">{dcxTest.loading ? "Placing…" : "Place test round-trip"}</button>
+                {dcxTest.result && (
+                  <div data-testid="coindcx-test-order-result" className={`mt-2 text-[11px] font-mono rounded border px-2 py-1.5 break-words ${dcxTest.result.ok ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>
+                    {dcxTest.result.ok ? `✓ ${dcxTest.result.coin} qty ${dcxTest.result.qty} · round-trip cost ≈ ${dcxTest.result.round_trip_cost_usdt} USDT · flat: ${dcxTest.result.flat ? "yes" : "CHECK"}` : `✗ ${dcxTest.result.error}`}
+                    {(dcxTest.result.steps || []).map((s, i) => <div key={i} className="text-[10px] text-slate-400">{s.ok ? "✓" : "✗"} {s.step}{s.status ? ` · ${s.status}` : ""}{s.avg_price ? ` @ ${s.avg_price}` : ""}{s.latency_ms ? ` · ${s.latency_ms} ms` : ""}{s.error ? ` · ${s.error}` : ""}</div>)}
+                  </div>
+                )}
+              </div>
               {telemetry?.feed?.fx && (
                 <div data-testid="fx-sources-row" className="mt-3 text-[10px] font-mono text-slate-500">
                   <span className="uppercase tracking-widest">USDT/INR blend</span> <span className="text-slate-200">₹{telemetry.feed.fx.rate}</span> = median of {Object.entries(telemetry.feed.fx.sources).map(([k, v]) => <span key={k} data-testid={`fx-source-${k}`} className={`ml-1.5 px-1.5 py-0.5 rounded border ${v.rate && telemetry.feed.fx.used.includes(k) ? "border-[#1E2638] text-slate-300" : "border-rose-900 text-rose-400"}`}>{k} {v.rate ?? "—"}</span>)}

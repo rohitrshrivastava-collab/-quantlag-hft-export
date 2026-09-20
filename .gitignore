@@ -85,3 +85,4 @@ android-sdk/
 **/.emergent/recordings/
 benchmark/last_result.json
 data/
+frontend/node_modules/.cache/default-development/0.pack

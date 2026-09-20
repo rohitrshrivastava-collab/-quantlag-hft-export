@@ -107,6 +107,21 @@ class CoinDCXFuturesClient:
             await asyncio.sleep(poll_s)
         return last
 
+    async def instrument(self, coin: str) -> Dict[str, Any]:
+        """Public instrument details: min_notional, quantity_increment, taker_fee, max leverage…"""
+        url = f"{self.base_url}/exchange/v1/derivatives/futures/data/instrument?pair={self.pair(coin)}&margin_currency_short_name=USDT"
+        async with aiohttp.ClientSession(timeout=self._timeout) as s:
+            async with s.get(url) as r:
+                d = await r.json(content_type=None)
+                if r.status >= 400: raise CoinDCXError(r.status, d)
+                return d.get("instrument") or d
+
+    async def last_price(self, coin: str) -> float:
+        async with aiohttp.ClientSession(timeout=self._timeout) as s:
+            async with s.get("https://public.coindcx.com/market_data/v3/current_prices/futures/rt") as r:
+                d = await r.json(content_type=None)
+        return float(((d.get("prices") or {}).get(self.pair(coin)) or {}).get("ls") or 0)
+
     def limiter_stats(self) -> Dict[str, Any]:
         d = self.limiter.stats(); d["http_429_count"] = self.http_429_count
         return d
