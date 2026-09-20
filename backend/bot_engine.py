@@ -36,11 +36,15 @@ from typing import Any, Callable, Dict, List, Optional
 import aiohttp
 
 from coinswitch_client import CoinSwitchError, CoinSwitchFuturesClient
-from coindcx_client import CoinDCXError, CoinDCXFuturesClient
+from coindcx_client import CoinDCXError, CoinDCXFuturesClient, CoinDCXUserStream
 from replay import TickRecorder
 from settings_store import apply_settings, load_settings, save_settings
 
 logger = logging.getLogger("bot_engine")
+
+
+class SlotTooSmall(Exception):
+    """Exchange minimum order size is far above the slot's notional."""
 
 
 # ---------------------------------------------------------------------------
@@ -802,12 +806,16 @@ class BotEngine:
         self._build_feeds()
         self.telegram = TelegramReporter(cfg.telegram_bot_token, cfg.telegram_chat_id)
         self.coindcx: Optional[CoinDCXFuturesClient] = None
+        self.coindcx_user_stream: Optional[CoinDCXUserStream] = None
         if cfg.coindcx_api_key and cfg.coindcx_api_secret:
             try:
                 self.coindcx = CoinDCXFuturesClient(cfg.coindcx_api_key, cfg.coindcx_api_secret,
                                                     margin_currency=os.environ.get("COINDCX_MARGIN_CURRENCY", "USDT"))
+                self.coindcx_user_stream = CoinDCXUserStream(cfg.coindcx_api_key, cfg.coindcx_api_secret)
+                self.coindcx.user_stream = self.coindcx_user_stream
             except Exception as e:
                 logger.warning(f"CoinDCX client init failed: {e}")
+        self._order_cooldown: Dict[str, float] = {}
         self._basis_samples: Dict[str, List[tuple]] = {c: [] for c in cfg.coins}
         self.settings_path = self.data_dir / "settings.json"
         self.recorder = TickRecorder(self.data_dir / "ticks", cfg.tick_retention_days, enabled=cfg.record_ticks and not cfg.simulate)
@@ -903,6 +911,7 @@ class BotEngine:
         if self.simulator: await self.simulator.start()
         if self.live_feed: await self.live_feed.start()
         if self.coinswitch_feed: await self.coinswitch_feed.start()
+        if self.coindcx_user_stream and self.cfg.laggard_exchange == "coindcx": await self.coindcx_user_stream.start()
         if self.recorder.enabled: await self.recorder.start()
         await self.fx.start()
         self._tasks = [
@@ -927,6 +936,7 @@ class BotEngine:
         if self.simulator: self.simulator.stop()
         if self.live_feed: self.live_feed.stop()
         if self.coinswitch_feed: self.coinswitch_feed.stop()
+        if self.coindcx_user_stream: self.coindcx_user_stream.stop()
         if self.coinswitch_poller: self.coinswitch_poller.stop()
         self.recorder.stop()
         self.persist()
@@ -1007,6 +1017,12 @@ class BotEngine:
                 "rate_limiter": self.coinswitch.limiter_stats() if self.coinswitch else None,
             },
             "fx": self.fx.status(),
+            "user_ws": None if not self.coindcx_user_stream else {
+                **self.coindcx_user_stream.status(),
+                "active": self.cfg.laggard_exchange == "coindcx",
+                "fills_via_ws": self.coindcx.fills_via_ws, "fills_via_rest": self.coindcx.fills_via_rest,
+                "last_fill_latency_ms": self.coindcx.last_fill_latency_ms, "last_fill_source": self.coindcx.last_fill_source,
+            },
             "recorder": self.recorder.status(),
             "restored_settings": self._restored_settings,
         }
@@ -1212,17 +1228,24 @@ class BotEngine:
                     self._live_missing_keys_warned = True
                 return
             fx = max(self.fx.rate, 1e-6)
+            if self._order_cooldown.get(coin, 0) > time.time(): return
             usdt_notional = notional_inr / fx
             qty = usdt_notional / max(leader.mid, 1e-9)
             side = "BUY" if direction == "LONG" else "SELL"
             t0 = time.perf_counter()
             try:
-                fill = await self._live_market(coin, side, qty, reduce_only=False)
+                fill = await self._live_market(coin, side, qty, reduce_only=False, price_usdt=leader.mid)
+            except SlotTooSmall as e:
+                self._order_cooldown[coin] = time.time() + 600
+                await self.store.log("WARN", f"[LIVE] {coin} skipped: {e} — raise equity/leverage or bench this coin; retry in 10 min")
+                return
             except (CoinSwitchError, CoinDCXError) as e:
-                await self.store.log("ERROR", f"[LIVE] {coin} order rejected {e.status}: {e.body}")
+                self._order_cooldown[coin] = time.time() + 30
+                await self.store.log("ERROR", f"[LIVE] {coin} order rejected {e.status}: {e.body} — cooling down 30s")
                 return
             except Exception as e:
-                await self.store.log("ERROR", f"[LIVE] {coin} order exception: {e}")
+                self._order_cooldown[coin] = time.time() + 30
+                await self.store.log("ERROR", f"[LIVE] {coin} order exception: {e} — cooling down 30s")
                 return
             latency_ms = (time.perf_counter() - t0) * 1000.0
             entry_order_id = fill["order_id"]
@@ -1242,7 +1265,7 @@ class BotEngine:
                    else entry_price * (1 + self.cfg.stop_loss_pct/100.0)
             await self.store.log(
                 "INFO",
-                f"[LIVE] {coin} filled {exec_qty} @ {avg_px} USDT ({status}) fee={fee_usdt} USDT")
+                f"[LIVE] {coin} filled {exec_qty} @ {avg_px} USDT ({status}) fee={fee_usdt} USDT · fill via {fill.get('fill_source') or 'REST'} {fill.get('fill_latency_ms') or '?'} ms")
 
         pos = Position(
             id=str(uuid.uuid4()),
@@ -1275,17 +1298,22 @@ class BotEngine:
     def _live_executor_ready(self) -> bool:
         return bool(self.coindcx if self.cfg.laggard_exchange == "coindcx" else self.coinswitch)
 
-    async def _live_market(self, coin: str, side: str, qty: float, reduce_only: bool) -> Dict[str, Any]:
+    async def _live_market(self, coin: str, side: str, qty: float, reduce_only: bool, price_usdt: float = 0.0) -> Dict[str, Any]:
         """Place a MARKET order on the configured laggard and wait for the fill.
         Returns {order_id, exec_qty, avg_px (USDT), fee (USDT), status}."""
         if self.cfg.laggard_exchange == "coindcx":
+            sized = await self.coindcx.size_qty(coin, qty, price_usdt, reduce_only)
+            if not reduce_only and price_usdt > 0 and sized * price_usdt > qty * price_usdt * 1.5 + 1e-9:
+                raise SlotTooSmall(f"{coin} exchange minimum ≈ {sized * price_usdt:.2f} USDT exceeds slot notional {qty * price_usdt:.2f} USDT")
+            qty = sized
             placed = await self.coindcx.market_order(coin, side, qty, self.cfg.leverage)
             oid = str(placed.get("id") or "")
             if not oid: raise RuntimeError(f"CoinDCX create missing id: {placed}")
             o = await self.coindcx.wait_for_fill(oid, side, timeout_s=self.cfg.live_order_timeout_s) or placed
             total = float(o.get("total_quantity") or 0); rem = float(o.get("remaining_quantity") or 0)
             return {"order_id": oid, "exec_qty": max(0.0, total - rem), "avg_px": float(o.get("avg_price") or 0),
-                    "fee": float(o.get("fee_amount") or 0), "status": str(o.get("status", ""))}
+                    "fee": float(o.get("fee_amount") or 0), "status": str(o.get("status", "")),
+                    "fill_source": self.coindcx.last_fill_source, "fill_latency_ms": self.coindcx.last_fill_latency_ms}
         placed = await self.coinswitch.place_order(symbol=f"{coin}USDT", side=side, order_type="MARKET",
                                                    quantity=qty, reduce_only=reduce_only)
         oid = (placed.get("data") or {}).get("order_id")
@@ -1323,6 +1351,7 @@ class BotEngine:
         exit_fee_inr: Optional[float] = None
         exit_order_id: Optional[str] = None
         if pos.mode == "LIVE" and self._live_executor_ready():
+            if self._order_cooldown.get(pos.coin, 0) > time.time(): return
             # place reduce_only MARKET on opposite side
             side = "SELL" if pos.direction == "LONG" else "BUY"
             try:
@@ -1338,11 +1367,15 @@ class BotEngine:
                         pos.contracts = exec_qty
                 await self.store.log(
                     "INFO",
-                    f"[LIVE] {pos.coin} CLOSE fill exec={exec_qty} avg={avg_px} fee={fee_usdt} USDT")
+                    f"[LIVE] {pos.coin} CLOSE fill exec={exec_qty} avg={avg_px} fee={fee_usdt} USDT · fill via {fill.get('fill_source') or 'REST'} {fill.get('fill_latency_ms') or '?'} ms")
             except (CoinSwitchError, CoinDCXError) as e:
-                await self.store.log("ERROR", f"[LIVE] {pos.coin} close rejected {e.status}: {e.body}")
+                self._order_cooldown[pos.coin] = time.time() + 10
+                await self.store.log("ERROR", f"[LIVE] {pos.coin} close rejected {e.status}: {e.body} — position kept open, retry in 10s")
+                return
             except Exception as e:
-                await self.store.log("ERROR", f"[LIVE] {pos.coin} close exception: {e}")
+                self._order_cooldown[pos.coin] = time.time() + 10
+                await self.store.log("ERROR", f"[LIVE] {pos.coin} close exception: {e} — position kept open, retry in 10s")
+                return
 
         notional = pos.notional_inr or pos.size_inr * max(1, pos.leverage)
         pos.exit_price_inr = price
