@@ -326,9 +326,14 @@ SQLite persistence, paper/live toggle.
   never mid-trade). Standalone task (survives set_coins stop/start). `GET /api/universe/auto`.
 - New config (persisted, PUT /api/config, GET /api/config, env): `auto_universe` (True),
   `max_coin_price_usd` (0), `universe_min_volume_usdt`, `universe_min_vol_pct`, `universe_refresh_s`.
-- Dashboard: `auto-universe-block` in Signal & Risk panel — `auto-universe-checkbox`,
-  `config-max-coin-price-input`, and `auto-universe-coins` ("Tracking: …") line. "Extra Hurdle %"
-  relabelled "Break-even margin %".
+- Dashboard: prominent **Max Coin Price (USD)** control (`max-coin-price-input` + `max-coin-price-save-btn`)
+  in the top **Account Controls** bar (was buried in the config panel), with the `auto-universe-checkbox`
+  and a live "Currently scanning: …" list (`auto-universe-coins`). "Extra Hurdle %" relabelled "Break-even margin %".
+- **Max-price enforced two ways**: (a) INSTANT scan-time gate in `_scan_coin` — any monitored coin whose
+  live Binance price > cap is skipped with state `PRICE_CAPPED` (amber badge), effective immediately with
+  NO feed restart and regardless of open positions; (b) `build_universe` also excludes capped coins when the
+  auto-universe swaps. 0/blank = no cap (all coins eligible). `universe_watcher` now heartbeats (`ticks`) and
+  reports why it deferred a swap (positions open) — the price cap does NOT wait for a swap window.
 - ENTRY GATE TIGHTENED: `hurdle_pct()` = entry_fee + exit_fee + slippage_buffer ONLY
   (dropped `hurdle_extra_pct`, so 0.13% at current settings, was 0.30%). `dynamic_hurdle_pct`
   likewise. `hurdle_extra_pct` (0.17) now only feeds the break-even floor (target still ≥

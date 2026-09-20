@@ -1371,6 +1371,10 @@ class BotEngine:
         if coin in self.paused:
             self._last_signal_state[coin] = "PAUSED"
             return
+        # max-price cap: only trade coins whose live price is at or below the cap (0 = no cap)
+        if self.cfg.max_coin_price_usd > 0 and leader.mid > self.cfg.max_coin_price_usd:
+            self._last_signal_state[coin] = "PRICE_CAPPED"
+            return
 
         hurdle = self.hurdle_pct()
         side = "LONG" if long_edge > hurdle else "SHORT" if short_edge > hurdle else None

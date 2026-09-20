@@ -337,8 +337,18 @@ function WalletChip({ wallet }) {
   );
 }
 
-function AccountPanel({ status, onApply, result, wallet }) {
+function AccountPanel({ status, onApply, result, wallet, config, onSaveUniverse, priceCapResult }) {
   const [draft, setDraft] = useState({ equity_inr: "", num_slots: "", leverage: "" });
+  const [maxPrice, setMaxPrice] = useState("");
+  const [autoUni, setAutoUni] = useState(true);
+  const priceInit = useRef(false);
+  useEffect(() => {
+    if (config && !priceInit.current) {
+      priceInit.current = true;
+      setMaxPrice(config.max_coin_price_usd > 0 ? String(config.max_coin_price_usd) : "");
+      setAutoUni(config.auto_universe !== false);
+    }
+  }, [config]);
   useEffect(() => {
     if (status && draft.num_slots === "" && draft.leverage === "") {
       setDraft({ equity_inr: String(status.starting_capital_inr ?? ""), num_slots: String(status.num_slots ?? ""), leverage: String(status.leverage ?? 1) });
@@ -364,6 +374,34 @@ function AccountPanel({ status, onApply, result, wallet }) {
         </span>
       </div>
       <WalletRow wallet={wallet} />
+      <div data-testid="max-coin-price-block" className="mb-4 rounded-lg border border-cyan-800/60 bg-cyan-950/20 px-3.5 py-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-widest text-cyan-300 font-mono">Max Coin Price (USD)</div>
+            <div className="text-[10px] text-slate-500 font-mono mt-0.5">Only coins priced ≤ this are scanned/traded. Leave blank = all coins.</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500 font-mono text-sm">$</span>
+            <input data-testid="max-coin-price-input" type="number" step="0.0001" min="0" placeholder="no cap"
+              value={maxPrice} onChange={(e) => setMaxPrice(e.target.value)}
+              className="w-28 bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-right text-sm focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-700" />
+            <button data-testid="max-coin-price-save-btn" onClick={() => onSaveUniverse({ max_coin_price_usd: Number(maxPrice) || 0, auto_universe: autoUni })}
+              className="px-3.5 py-1.5 rounded-full bg-cyan-500 hover:bg-cyan-400 text-slate-900 text-xs font-bold uppercase tracking-widest transition-colors duration-150">Apply</button>
+          </div>
+        </div>
+        <label data-testid="auto-universe-toggle" className="mt-2.5 flex items-center gap-2 text-[11px] font-mono text-slate-400 cursor-pointer">
+          <input data-testid="auto-universe-checkbox" type="checkbox" checked={autoUni}
+            onChange={(e) => { setAutoUni(e.target.checked); onSaveUniverse({ auto_universe: e.target.checked, max_coin_price_usd: Number(maxPrice) || 0 }); }}
+            className="h-3.5 w-3.5 accent-cyan-500" />
+          Auto-pick the {config?.num_slots ?? status?.num_slots ?? 10} best coins by liquidity × volatility (refreshes every minute)
+        </label>
+        {config?.coins && (
+          <div data-testid="auto-universe-coins" className="mt-1.5 text-[10px] font-mono text-slate-400">
+            Currently scanning: <span className="text-cyan-300">{config.coins.join(", ")}</span>
+          </div>
+        )}
+        {priceCapResult && <div data-testid="max-coin-price-result" className={`mt-2 text-[11px] font-mono rounded border px-2 py-1.5 ${priceCapResult.ok ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>{priceCapResult.ok ? `✓ ${priceCapResult.msg}` : `✗ ${priceCapResult.error}`}</div>}
+      </div>
       <div className="grid grid-cols-3 gap-3 text-xs">
         {field("equity_inr", "Total Equity ₹", "account-equity-input", "100", equityChanged ? "resets PnL & stats" : "current baseline")}
         {field("num_slots", "Open Positions (slots)", "account-slots-input", "1", `${status?.open_positions ?? 0} open now`)}
@@ -591,6 +629,7 @@ const stateBadge = (state) => {
     STALE_BOOK: "bg-slate-800 text-fuchsia-200 border-fuchsia-900",
     ARMING_LONG: "bg-emerald-950/30 text-emerald-200 border-emerald-900 border-dashed",
     ARMING_SHORT: "bg-rose-950/30 text-rose-200 border-rose-900 border-dashed",
+    PRICE_CAPPED: "bg-amber-950/50 text-amber-300 border-amber-800",
   };
   return `inline-flex items-center px-2 py-0.5 rounded-full border font-mono text-[10px] uppercase tracking-wider ${map[state] || map.WAITING}`;
 };
@@ -772,8 +811,6 @@ function Dashboard() {
       stop_max_pct: Number(cfgDraft.stop_max_pct),
       stop_mode: cfgDraft.stop_mode,
       breakeven_floor: !!cfgDraft.breakeven_floor,
-      auto_universe: !!cfgDraft.auto_universe,
-      max_coin_price_usd: Number(cfgDraft.max_coin_price_usd) || 0,
     });
     setSaving(false);
     pull();
@@ -865,6 +902,15 @@ function Dashboard() {
       const ch = Object.entries(r.data.changes).map(([k, v]) => `${k}=${v}`).join(", ") || "no changes";
       setAccountResult({ ok: true, msg: `Applied: ${ch}${r.data.leverage_errors?.length ? ` · leverage errors: ${r.data.leverage_errors.length}` : ""}` });
     } catch (e) { setAccountResult({ ok: false, error: e.response?.data?.detail || e.message }); }
+    pull();
+  };
+  const [priceCapResult, setPriceCapResult] = useState(null);
+  const saveUniverse = async (body) => {
+    try {
+      const r = await axios.put(`${API}/config`, body);
+      setConfig(r.data);
+      setPriceCapResult({ ok: true, msg: (r.data.max_coin_price_usd > 0) ? `Only coins ≤ $${r.data.max_coin_price_usd} will be scanned` : "No cap — all qualifying coins scanned" });
+    } catch (e) { setPriceCapResult({ ok: false, error: e.response?.data?.detail || e.message }); }
     pull();
   };
   const sendDigest = async () => {
@@ -983,7 +1029,7 @@ function Dashboard() {
 
         <FeedHealthStrip feed={telemetry?.feed} />
 
-        <AccountPanel status={status} onApply={applyAccount} result={accountResult} wallet={wallet} />
+        <AccountPanel status={status} onApply={applyAccount} result={accountResult} wallet={wallet} config={config} onSaveUniverse={saveUniverse} priceCapResult={priceCapResult} />
 
         {/* Spread monitor grid */}
         <section>
@@ -1142,24 +1188,6 @@ function Dashboard() {
         <section className="grid lg:grid-cols-2 gap-6">
           <div data-testid="bot-config-controls-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
             <h3 className="font-semibold text-slate-200 mb-4" style={{fontFamily:"Outfit, sans-serif"}}>Signal & Risk Parameters</h3>
-            {cfgDraft && (
-              <div data-testid="auto-universe-block" className="mb-3 rounded border border-cyan-900/50 bg-cyan-950/10 px-3 py-2.5">
-                <label data-testid="auto-universe-toggle" className="flex items-center justify-between gap-3 text-xs">
-                  <span className="font-mono text-slate-200">Auto coin selection <span className="text-slate-500">· picks {config?.num_slots ?? status?.num_slots ?? 10} best pairs by liquidity × volatility, both exchanges</span></span>
-                  <input data-testid="auto-universe-checkbox" type="checkbox" checked={!!cfgDraft.auto_universe} onChange={(e) => setCfgDraft({ ...cfgDraft, auto_universe: e.target.checked })} className="h-4 w-4 accent-cyan-500" />
-                </label>
-                <label className="mt-2.5 flex items-center justify-between gap-3 text-xs">
-                  <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Max Coin Price (USD) <span className="normal-case tracking-normal text-slate-600">· 0 = no cap</span></span>
-                  <input data-testid="config-max-coin-price-input" type="number" step="0.01" min="0" placeholder="0" value={cfgDraft.max_coin_price_usd ?? 0} onChange={(e) => setCfgDraft({ ...cfgDraft, max_coin_price_usd: e.target.value })}
-                    className="w-28 bg-[#0A0D12] border border-[#1E2638] rounded px-2 py-1.5 font-mono text-slate-100 text-right focus:outline-none focus:border-cyan-600 focus:ring-1 focus:ring-cyan-800"/>
-                </label>
-                {config?.coins && (
-                  <div data-testid="auto-universe-coins" className="mt-2 text-[10px] font-mono text-slate-400 leading-relaxed">
-                    Tracking: <span className="text-cyan-300">{config.coins.join(", ")}</span>
-                  </div>
-                )}
-              </div>
-            )}
             {cfgDraft && (
               <label data-testid="basis-filter-toggle" className="mb-3 flex items-center justify-between gap-3 rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2 text-xs">
                 <span className="font-mono text-slate-300">Basis filter <span className="text-slate-500">· subtract rolling {cfgDraft.basis_window_s || 300}s median offset</span></span>

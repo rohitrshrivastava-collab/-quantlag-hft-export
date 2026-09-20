@@ -210,21 +210,28 @@ async def coinswitch_trial():
     return {**TRIAL, "laggard_exchange": ENGINE.cfg.laggard_exchange, "mode": "PAPER" if ENGINE.cfg.paper_trading else "LIVE"}
 
 
-UNIVERSE: Dict[str, Any] = {"last": None, "selected": None, "applied_at": None, "error": None, "runs": 0}
+UNIVERSE: Dict[str, Any] = {"last": None, "selected": None, "applied_at": None, "error": None, "runs": 0, "ticks": 0, "skipped": None}
 
 
 async def universe_watcher() -> None:
     """Continuously rebuild the traded shortlist (liquidity × volatility × max-price, both exchanges).
 
-    Runs only while the bot is live, auto-universe is on, and no positions are open
-    (swapping the universe restarts feeds, so we never do it mid-trade)."""
+    Applies a swap via set_coins only when the bot is live, auto-universe is on, and no
+    positions are open (a swap restarts feeds). The hard max-price cap is ALSO enforced
+    instantly at scan time in the engine, so it takes effect even between swaps."""
     await asyncio.sleep(5)  # let feeds warm up before the first rebuild
     while True:
         delay = 60
         try:
+            UNIVERSE["ticks"] += 1
             c = ENGINE.cfg
             delay = max(20, int(c.universe_refresh_s))
-            if c.auto_universe and ENGINE.running and not await ENGINE.store.all_open():
+            if not (c.auto_universe and ENGINE.running):
+                UNIVERSE["skipped"] = "auto-universe off or bot stopped"
+            elif await ENGINE.store.all_open():
+                UNIVERSE["skipped"] = "positions open (swap deferred; price cap still enforced live)"
+            else:
+                UNIVERSE["skipped"] = None
                 res = await build_universe(
                     laggard=c.laggard_exchange, top_n=max(1, c.num_slots),
                     max_price_usd=c.max_coin_price_usd,
