@@ -162,10 +162,36 @@ class CoinDCXFuturesClient:
         self.last_fill_latency_ms: Optional[float] = None
         self.last_fill_source: str = ""
         self._specs: Dict[str, Dict[str, Any]] = {}
+        self.last_create_ms: Optional[int] = None
+        self.last_warm_ms: Optional[int] = None
+        self.last_warm_error: str = ""
 
     @staticmethod
     def pair(coin: str) -> str:
         return f"B-{coin.upper()}_USDT"
+
+    async def _session(self) -> aiohttp.ClientSession:
+        """One warm keep-alive session (DNS+TCP+TLS reused) — saves ~300-500 ms per order vs a fresh connection."""
+        s = getattr(self, "_sess", None)
+        if s is None or s.closed:
+            conn = aiohttp.TCPConnector(limit=8, ttl_dns_cache=300, keepalive_timeout=60, enable_cleanup_closed=True)
+            s = self._sess = aiohttp.ClientSession(timeout=self._timeout, connector=conn)
+        return s
+
+    async def keep_warm(self) -> None:
+        """Periodic cheap public GET on the same host so the TLS connection never goes cold between orders."""
+        try:
+            s = await self._session()
+            t0 = time.perf_counter()
+            async with s.get(f"{self.base_url}/exchange/v1/derivatives/futures/data/instrument?pair=B-BTC_USDT&margin_currency_short_name={self.margin_currency}") as r:
+                await r.read()
+            self.last_warm_ms = round((time.perf_counter() - t0) * 1000)
+        except Exception as e:
+            self.last_warm_error = str(e)[:80]
+
+    async def close(self) -> None:
+        s = getattr(self, "_sess", None)
+        if s and not s.closed: await s.close()
 
     async def _request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None, _attempt: int = 0) -> Any:
         await self.limiter.acquire(path)
@@ -173,18 +199,21 @@ class CoinDCXFuturesClient:
         raw = json.dumps(payload, separators=(",", ":")).encode()
         sig = hmac.new(self._secret, raw, hashlib.sha256).hexdigest()
         headers = {"Content-Type": "application/json", "X-AUTH-APIKEY": self.api_key, "X-AUTH-SIGNATURE": sig}
-        async with aiohttp.ClientSession(timeout=self._timeout) as s:
-            async with s.request(method, self.base_url + path, data=raw, headers=headers) as r:
-                text = await r.text()
-                try: data = json.loads(text) if text else {}
-                except Exception: data = {"raw": text}
-                if r.status == 429 and _attempt < 2:
-                    self.http_429_count += 1
-                    await asyncio.sleep(1.5 * (2 ** _attempt))
-                    return await self._request(method, path, body, _attempt + 1)
-                if r.status >= 400:
-                    raise CoinDCXError(r.status, data)
-                return data
+        s = await self._session()
+        t0 = time.perf_counter()
+        async with s.request(method, self.base_url + path, data=raw, headers=headers) as r:
+            text = await r.text()
+            try: data = json.loads(text) if text else {}
+            except Exception: data = {"raw": text}
+            if path.endswith("/orders/create"):
+                self.last_create_ms = round((time.perf_counter() - t0) * 1000)
+            if r.status == 429 and _attempt < 2:
+                self.http_429_count += 1
+                await asyncio.sleep(1.5 * (2 ** _attempt))
+                return await self._request(method, path, body, _attempt + 1)
+            if r.status >= 400:
+                raise CoinDCXError(r.status, data)
+            return data
 
     async def wallet_balance(self) -> Any:
         return await self._request("GET", "/exchange/v1/derivatives/futures/wallets")
@@ -298,11 +327,11 @@ class CoinDCXFuturesClient:
     async def instrument(self, coin: str) -> Dict[str, Any]:
         """Public instrument details: min_notional, quantity_increment, taker_fee, max leverage…"""
         url = f"{self.base_url}/exchange/v1/derivatives/futures/data/instrument?pair={self.pair(coin)}&margin_currency_short_name={self.margin_currency}"
-        async with aiohttp.ClientSession(timeout=self._timeout) as s:
-            async with s.get(url) as r:
-                d = await r.json(content_type=None)
-                if r.status >= 400: raise CoinDCXError(r.status, d)
-                return d.get("instrument") or d
+        s = await self._session()
+        async with s.get(url) as r:
+            d = await r.json(content_type=None)
+            if r.status >= 400: raise CoinDCXError(r.status, d)
+            return d.get("instrument") or d
 
     async def last_price(self, coin: str) -> float:
         async with aiohttp.ClientSession(timeout=self._timeout) as s:

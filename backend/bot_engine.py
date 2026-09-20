@@ -98,6 +98,7 @@ class BotConfig:
     phantom_frozen_s: float = 3.0          # laggard book unchanged this long while Binance ticks → PHANTOM
     depth_bps: float = 10.0                # resting-depth window reported per coin
     min_order_inr: float = 100.0           # shrink floor: skip if the book can't absorb at least this
+    max_entry_frozen_s: float = 1.0        # fresh-book filter: laggard top-5 must have changed within this many s
     # shadow comparison assumptions (per laggard exchange)
     coinswitch_taker_fee_pct: float = 0.05
     coindcx_taker_fee_pct: float = 0.059
@@ -147,6 +148,7 @@ class BotConfig:
             phantom_frozen_s=_f("PHANTOM_FROZEN_S", 3.0),
             depth_bps=_f("DEPTH_BPS", 10.0),
             min_order_inr=_f("MIN_ORDER_INR", 100.0),
+            max_entry_frozen_s=_f("MAX_ENTRY_FROZEN_S", 1.0),
             coinswitch_taker_fee_pct=_f("COINSWITCH_TAKER_FEE_PCT", 0.05),
             coindcx_taker_fee_pct=_f("COINDCX_TAKER_FEE_PCT", 0.059),
             coinswitch_exec_latency_s=_f("COINSWITCH_EXEC_LATENCY_S", 1.0),
@@ -915,7 +917,7 @@ class BotEngine:
         self._heat: Dict[str, Dict[int, float]] = {c: {} for c in cfg.coins}
         self.paused: set = set()
         self._last_liq: Dict[str, Dict[str, Any]] = {}
-        self.liq_stats: Dict[str, int] = {"phantom_skips": 0, "thin_skips": 0, "edge_skips": 0, "shrunk": 0}
+        self.liq_stats: Dict[str, int] = {"phantom_skips": 0, "thin_skips": 0, "edge_skips": 0, "shrunk": 0, "stale_skips": 0}
         self._live_missing_keys_warned = False
         self._stale_no_keys_warned = False
         self._restored_settings = apply_settings(self, load_settings(self.settings_path))
@@ -989,13 +991,13 @@ class BotEngine:
                 if not self.coinswitch: return out
                 out["keys"] = True
                 wb = await self.coinswitch.wallet_balance()
-                data = wb.get("data", wb) if isinstance(wb, dict) else wb
-                rows = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
-                for w in rows:
-                    cur = str(w.get("currency") or w.get("asset") or w.get("currency_short_name") or "USDT").upper()
-                    bal = w.get("total_balance", w.get("balance", w.get("wallet_balance", 0)))
-                    locked = w.get("locked_balance", w.get("blocked_balance", w.get("order_margin", 0)))
-                    out["balances"].append({"currency": cur, "balance": float(bal or 0), "locked": float(locked or 0), "raw": w})
+                data = wb.get("data", wb) if isinstance(wb, dict) else {}
+                for w in (data.get("base_asset_balances") or []) if isinstance(data, dict) else []:
+                    b = w.get("balances") or {}
+                    out["balances"].append({"currency": str(w.get("base_asset") or "USDT").upper(),
+                                            "balance": float(b.get("total_balance") or 0),
+                                            "locked": float(b.get("total_blocked_balance") or 0) + float(b.get("total_position_margin") or 0)})
+                out["margin_currency"] = "USDT"
         except Exception as e:
             out["error"] = str(e)
         return out
@@ -1031,6 +1033,8 @@ class BotEngine:
         ]
         if self.coinswitch_feed:
             self._tasks.append(asyncio.create_task(self._feed_watchdog_loop()))
+        if self.coindcx and self.cfg.laggard_exchange == "coindcx":
+            self._tasks.append(asyncio.create_task(self._keep_warm_loop()))
         if self.telegram.enabled:
             self._tasks.append(asyncio.create_task(self._telegram_resolve_bot()))
             self._tasks.append(asyncio.create_task(self._daily_digest_loop()))
@@ -1091,6 +1095,14 @@ class BotEngine:
                 await asyncio.sleep(2)
         except asyncio.CancelledError: pass
 
+    async def _keep_warm_loop(self) -> None:
+        """Keep the CoinDCX HTTPS connection hot so order create doesn't pay DNS+TCP+TLS."""
+        try:
+            while self.running:
+                await self.coindcx.keep_warm()
+                await asyncio.sleep(15)
+        except asyncio.CancelledError: pass
+
     def laggard_source(self) -> str:
         if self.simulator: return "SIMULATOR"
         if self.coinswitch_feed and not self._feed_stale(): return f"{self.cfg.laggard_exchange.upper()}_WS"
@@ -1127,12 +1139,15 @@ class BotEngine:
             },
             "fx": self.fx.status(),
             "liquidity_guard": {**self.liq_stats, "max_slippage_pct": self.cfg.max_slippage_pct,
-                                "phantom_frozen_s": self.cfg.phantom_frozen_s, "min_order_inr": self.cfg.min_order_inr},
+                                "phantom_frozen_s": self.cfg.phantom_frozen_s, "min_order_inr": self.cfg.min_order_inr,
+                                "max_entry_frozen_s": self.cfg.max_entry_frozen_s},
             "user_ws": None if not self.coindcx_user_stream else {
                 **self.coindcx_user_stream.status(),
                 "active": self.cfg.laggard_exchange == "coindcx",
                 "fills_via_ws": self.coindcx.fills_via_ws, "fills_via_rest": self.coindcx.fills_via_rest,
                 "last_fill_latency_ms": self.coindcx.last_fill_latency_ms, "last_fill_source": self.coindcx.last_fill_source,
+                "last_create_ms": self.coindcx.last_create_ms, "last_warm_ms": self.coindcx.last_warm_ms,
+                "last_warm_error": self.coindcx.last_warm_error,
             },
             "recorder": self.recorder.status(),
             "restored_settings": self._restored_settings,
@@ -1354,6 +1369,11 @@ class BotEngine:
                 self.liq_stats["phantom_skips"] += 1
                 self._last_signal_state[coin] = "PHANTOM"
                 return
+            if liq["frozen_s"] > self.cfg.max_entry_frozen_s:
+                # fresh-book filter: a quote that hasn't moved is a stale copy, not a dislocation
+                self.liq_stats["stale_skips"] = self.liq_stats.get("stale_skips", 0) + 1
+                self._last_signal_state[coin] = "STALE_BOOK"
+                return
             if liq["fillable_inr"] < notional_inr:
                 if liq["fillable_inr"] < self.cfg.min_order_inr:
                     self.liq_stats["thin_skips"] += 1
@@ -1425,7 +1445,7 @@ class BotEngine:
                    else entry_price * (1 + self.cfg.stop_loss_pct/100.0)
             await self.store.log(
                 "INFO",
-                f"[LIVE] {coin} filled {exec_qty} @ {avg_px} USDT ({status}) fee={fee_usdt} USDT · fill via {fill.get('fill_source') or 'REST'} {fill.get('fill_latency_ms') or '?'} ms")
+                f"[LIVE] {coin} filled {exec_qty} @ {avg_px} USDT ({status}) fee={fee_usdt} USDT · create {self.coindcx.last_create_ms if self.coindcx else '?'} ms · fill via {fill.get('fill_source') or 'REST'} {fill.get('fill_latency_ms') or '?'} ms")
 
         # never take profit below break-even: the target must at least cover both taker fees + edge
         be = (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct + self.cfg.hurdle_extra_pct) / 100.0

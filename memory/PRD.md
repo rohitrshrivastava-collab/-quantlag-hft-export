@@ -245,6 +245,21 @@ SQLite persistence, paper/live toggle.
 - Shadow sim books at a pinned fx0.
 - Testing: `iteration_13.json` backend 7/7, frontend pass; pair round-trip verified live.
 
+### Iteration 14 (2026-06, "0.30% hurdle · fresh-book filter · warm CoinDCX session · CoinSwitch keys")
+- Hurdle raised to 0.30% (`hurdle_extra_pct` 0.17). New `max_entry_frozen_s` (1.0 s, env
+  `MAX_ENTRY_FROZEN_S`, PUT /api/config, dashboard "Fresh book ≤ (s)"): entries skipped
+  with state `STALE_BOOK` when the laggard top-5 hasn't changed within it (`stale_skips`).
+- `CoinDCXFuturesClient` now keeps ONE warm keep-alive `ClientSession` (+ `keep_warm()` GET
+  every 15 s from `_keep_warm_loop`): order create dropped from ≈1.2 s to **344–451 ms**;
+  `last_create_ms/last_warm_ms` in `telemetry.feed.user_ws` and the DCX FILLS chip. Fill
+  confirmation via WS (~620–650 ms) is now the bottleneck → total ≈1.0–1.3 s (was ~2 s).
+- CoinSwitch PRO keys installed (backend/.env) and verified via `/api/coinswitch/check`;
+  futures wallet is USDT-margined and holds 0.0055 USDT (empty) — LIVE on Pair A would be
+  rejected for margin until funded. `wallet()` parses `base_asset_balances`.
+- First 0.30% live trade: NEAR LONG 4 @3.749 → STOP_LOSS @3.735 (Binance spike reverted),
+  net −₹7.33 at 10x; slot shrunk ₹1764→₹1492 by the liquidity guard.
+- Testing: self-tested (curl + screenshot); CoinSwitch wallet via engine script.
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 

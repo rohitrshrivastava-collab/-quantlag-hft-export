@@ -88,6 +88,7 @@ class ConfigUpdate(BaseModel):
     max_slippage_pct: Optional[float] = Field(default=None, ge=0, le=2)
     phantom_frozen_s: Optional[float] = Field(default=None, ge=0.5, le=60)
     min_order_inr: Optional[float] = Field(default=None, ge=1, le=1e6)
+    max_entry_frozen_s: Optional[float] = Field(default=None, ge=0.1, le=60)
 
 
 class AccountUpdate(BaseModel):
@@ -190,6 +191,7 @@ async def get_config():
         "max_slippage_pct": c.max_slippage_pct,
         "phantom_frozen_s": c.phantom_frozen_s,
         "min_order_inr": c.min_order_inr,
+        "max_entry_frozen_s": c.max_entry_frozen_s,
         "depth_bps": c.depth_bps,
     }
 

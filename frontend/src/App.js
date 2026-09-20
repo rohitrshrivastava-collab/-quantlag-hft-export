@@ -558,7 +558,7 @@ function FeedHealthStrip({ feed }) {
         ld.connected ? SOURCE_STYLE.COINSWITCH_WS : SOURCE_STYLE.STALE)}
       {feed.rest_fallback?.active && pill("feed-rest-fallback-badge", "REST FALLBACK ACTIVE", SOURCE_STYLE.REST_POLLER)}
       {feed.user_ws && feed.user_ws.active && pill("feed-user-ws-badge",
-        `DCX FILLS · ${feed.user_ws.joined ? "WS LIVE" : feed.user_ws.connected ? "WS JOINING" : "WS DOWN"} · ${feed.user_ws.order_updates} upd${feed.user_ws.last_fill_latency_ms != null ? ` · last ${feed.user_ws.last_fill_source} ${feed.user_ws.last_fill_latency_ms} ms` : ""}`,
+        `DCX FILLS · ${feed.user_ws.joined ? "WS LIVE" : feed.user_ws.connected ? "WS JOINING" : "WS DOWN"} · ${feed.user_ws.order_updates} upd${feed.user_ws.last_create_ms != null ? ` · create ${feed.user_ws.last_create_ms} ms` : ""}${feed.user_ws.last_fill_latency_ms != null ? ` · fill ${feed.user_ws.last_fill_source} ${feed.user_ws.last_fill_latency_ms} ms` : ""}${feed.user_ws.last_warm_ms != null ? ` · warm ${feed.user_ws.last_warm_ms} ms` : ""}`,
         feed.user_ws.joined ? "border-violet-800 bg-violet-950/40 text-violet-300" : SOURCE_STYLE.STALE)}
       {feed.simulate && pill("feed-simulator-badge", "SIMULATOR · set SIMULATE_MARKET=false for real feeds", SOURCE_STYLE.SIMULATOR)}
       {lg && (
@@ -585,6 +585,7 @@ const stateBadge = (state) => {
     IN_TRADE: "bg-cyan-950/50 text-cyan-300 border-cyan-800",
     PHANTOM: "bg-fuchsia-950/50 text-fuchsia-300 border-fuchsia-800",
     THIN: "bg-orange-950/50 text-orange-300 border-orange-800",
+    STALE_BOOK: "bg-slate-800 text-fuchsia-200 border-fuchsia-900",
   };
   return `inline-flex items-center px-2 py-0.5 rounded-full border font-mono text-[10px] uppercase tracking-wider ${map[state] || map.WAITING}`;
 };
@@ -754,6 +755,7 @@ function Dashboard() {
       max_slippage_pct: Number(cfgDraft.max_slippage_pct),
       phantom_frozen_s: Number(cfgDraft.phantom_frozen_s),
       min_order_inr: Number(cfgDraft.min_order_inr),
+      max_entry_frozen_s: Number(cfgDraft.max_entry_frozen_s),
     });
     setSaving(false);
     pull();
@@ -1124,6 +1126,7 @@ function Dashboard() {
                   ["max_slippage_pct", "Max RT Slippage %", "config-max-slippage-input"],
                   ["phantom_frozen_s", "Phantom after (s)", "config-phantom-frozen-input"],
                   ["min_order_inr", "Shrink floor ₹", "config-min-order-input"],
+                  ["max_entry_frozen_s", "Fresh book ≤ (s)", "config-fresh-book-input"],
                 ].map(([k, label, tid]) => (
                   <label key={k} className="block">
                     <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">{label}</span>
