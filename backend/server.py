@@ -133,6 +133,38 @@ async def bot_mode(body: ModeUpdate):
     return {"ok": True, "mode": mode, "warning": warning}
 
 
+class LaggardUpdate(BaseModel):
+    exchange: str
+
+
+@api.post("/laggard")
+async def set_laggard(body: LaggardUpdate):
+    """Switch the traded pair: Binance → coinswitch | coindcx. Refuses with open positions."""
+    try:
+        await ENGINE.set_laggard_exchange(body.exchange)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    WALLET_CACHE["ts"] = 0.0
+    warning = None
+    if not ENGINE.cfg.paper_trading and not ENGINE._live_executor_ready():
+        warning = f"{ENGINE.cfg.laggard_exchange.upper()} keys not configured — LIVE mode will not place orders on this pair."
+    return {"ok": True, "laggard_exchange": ENGINE.cfg.laggard_exchange, "warning": warning, "status": ENGINE.snapshot()}
+
+
+WALLET_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+
+
+@api.get("/wallet")
+async def wallet(force: bool = False):
+    """Futures wallet of the active pair's laggard exchange, cached 10 s to respect rate limits."""
+    if force or WALLET_CACHE["data"] is None or time.time() - WALLET_CACHE["ts"] > 10 or WALLET_CACHE["data"].get("exchange") != ENGINE.cfg.laggard_exchange:
+        WALLET_CACHE["data"] = await ENGINE.wallet()
+        WALLET_CACHE["ts"] = time.time()
+    return WALLET_CACHE["data"]
+
+
 @api.get("/config")
 async def get_config():
     c = ENGINE.cfg

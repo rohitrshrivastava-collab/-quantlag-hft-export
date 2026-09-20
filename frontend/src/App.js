@@ -308,7 +308,36 @@ function ScreenerPanel({ result, onRun, onApply, running, applyResult, openCount
 
 const EX_ORDER = ["binance", "coinswitch", "coindcx"];
 
-function AccountPanel({ status, onApply, result }) {
+function WalletRow({ wallet }) {
+  if (!wallet) return null;
+  const ex = (wallet.exchange || "").toUpperCase();
+  return (
+    <div data-testid="account-wallet-row" className="mb-4 rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2 text-xs font-mono flex items-center gap-3 flex-wrap">
+      <span className="text-[10px] uppercase tracking-widest text-slate-500">Exchange wallet · {ex}</span>
+      {!wallet.keys && <span data-testid="account-wallet-nokeys" className="text-amber-300">API keys not configured for {ex}</span>}
+      {wallet.error && <span data-testid="account-wallet-error" className="text-rose-300 truncate">✗ {wallet.error}</span>}
+      {wallet.keys && !wallet.error && (wallet.balances || []).map((b) => (
+        <span key={b.currency} data-testid={`account-wallet-${b.currency}`} className={`px-2 py-0.5 rounded border ${b.currency === wallet.margin_currency ? "border-emerald-800 bg-emerald-950/30 text-emerald-200" : "border-[#1E2638] text-slate-300"}`}>
+          {b.currency} <b>{b.currency === "INR" ? fmtINR(b.balance) : Number(b.balance).toFixed(4)}</b>{b.locked ? <span className="text-slate-500"> · locked {b.currency === "INR" ? fmtINR(b.locked) : Number(b.locked).toFixed(4)}</span> : null}
+        </span>
+      ))}
+      {wallet.keys && !wallet.error && !(wallet.balances || []).length && <span className="text-slate-500">empty</span>}
+      <span className="ml-auto text-[10px] text-slate-600">refreshed {wallet.fetched_at ? `${Math.max(0, Math.round(Date.now() / 1000 - wallet.fetched_at))}s ago` : "—"}</span>
+    </div>
+  );
+}
+
+function WalletChip({ wallet }) {
+  const main = wallet?.balances?.find((b) => b.currency === (wallet.margin_currency || "INR")) || wallet?.balances?.[0];
+  const label = !wallet ? "…" : !wallet.keys ? "NO KEYS" : wallet.error ? "ERROR" : main ? (main.currency === "INR" ? fmtINR(main.balance) : `${Number(main.balance).toFixed(2)} ${main.currency}`) : "—";
+  return (
+    <span data-testid="wallet-balance-chip" title={wallet?.error || `${(wallet?.exchange || "").toUpperCase()} futures wallet (10 s refresh)`} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border font-mono text-[10px] uppercase tracking-wider ${wallet?.error || (wallet && !wallet.keys) ? "border-amber-800 bg-amber-950/30 text-amber-300" : "border-emerald-800 bg-emerald-950/30 text-emerald-300"}`}>
+      <Wallet className="h-3 w-3"/> {(wallet?.exchange || "").toUpperCase()} WALLET · {label}
+    </span>
+  );
+}
+
+function AccountPanel({ status, onApply, result, wallet }) {
   const [draft, setDraft] = useState({ equity_inr: "", num_slots: "", leverage: "" });
   useEffect(() => {
     if (status && draft.num_slots === "" && draft.leverage === "") {
@@ -334,6 +363,7 @@ function AccountPanel({ status, onApply, result }) {
           {fmtINR(status?.allocated_per_slot_inr)} margin × {draft.leverage || 1}x = {fmtINR(notional)} / slot
         </span>
       </div>
+      <WalletRow wallet={wallet} />
       <div className="grid grid-cols-3 gap-3 text-xs">
         {field("equity_inr", "Total Equity ₹", "account-equity-input", "100", equityChanged ? "resets PnL & stats" : "current baseline")}
         {field("num_slots", "Open Positions (slots)", "account-slots-input", "1", `${status?.open_positions ?? 0} open now`)}
@@ -687,6 +717,22 @@ function Dashboard() {
     await axios.post(`${API}/bot/mode`, { paper_trading: status.mode !== "PAPER" });
     pull();
   };
+  const [wallet, setWallet] = useState(null);
+  const [pairSwitching, setPairSwitching] = useState(false);
+  const [pairMsg, setPairMsg] = useState(null);
+  const pullWallet = async () => { try { const r = await axios.get(`${API}/wallet`); setWallet(r.data); } catch (e) { console.error(e); } };
+  useEffect(() => { pullWallet(); const id = setInterval(pullWallet, 10000); return () => clearInterval(id); }, []);
+  const togglePair = async () => {
+    if (!status || pairSwitching) return;
+    const next = status.laggard_exchange === "coindcx" ? "coinswitch" : "coindcx";
+    setPairSwitching(true); setPairMsg(null);
+    try {
+      const r = await axios.post(`${API}/laggard`, { exchange: next });
+      setPairMsg(r.data.warning ? { level: "warn", text: r.data.warning } : { level: "ok", text: `Pair switched to Binance → ${next.toUpperCase()}` });
+    } catch (e) { setPairMsg({ level: "error", text: e.response?.data?.detail || e.message }); }
+    setPairSwitching(false);
+    pull(); pullWallet();
+  };
   const startStop = async () => {
     await axios.post(`${API}/bot/${status?.running ? "stop" : "start"}`);
     pull();
@@ -861,7 +907,7 @@ function Dashboard() {
             </div>
             <div>
               <div className="text-lg font-extrabold tracking-tight" style={{fontFamily: "Outfit, sans-serif"}}>QuantLag <span className="text-cyan-400">HFT</span></div>
-              <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Binance → CoinSwitch PRO · Lead-Lag Arb</div>
+              <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Binance → {status?.laggard_exchange === "coindcx" ? "CoinDCX Futures" : "CoinSwitch PRO"} · Lead-Lag Arb</div>
             </div>
           </div>
           <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
@@ -872,8 +918,12 @@ function Dashboard() {
               USDT/INR · {fmtNum(status?.fx_usdt_inr, 4)}
             </span>
             <span data-testid="leverage-slots-badge" className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-cyan-800 bg-cyan-950/30 text-cyan-300 font-mono text-[10px] uppercase tracking-wider">
-              {status?.leverage || 1}x · {status?.num_slots || 10} slots · {(status?.laggard_exchange || "coinswitch")}
+              {status?.leverage || 1}x · {status?.num_slots || 10} slots
             </span>
+            <WalletChip wallet={wallet} />
+            <button data-testid="pair-toggle" onClick={togglePair} disabled={pairSwitching} title="Switch the traded pair (refused while positions are open)" className={`px-3 py-1.5 rounded-full border font-mono text-[10px] uppercase tracking-widest transition-colors duration-150 disabled:opacity-50 ${status?.laggard_exchange === "coindcx" ? "border-cyan-700 bg-cyan-950/30 text-cyan-300 hover:bg-cyan-950/60" : "border-violet-700 bg-violet-950/30 text-violet-300 hover:bg-violet-950/60"}`}>
+              PAIR · BINANCE→{pairSwitching ? "…" : (status?.laggard_exchange || "coinswitch").toUpperCase()}
+            </button>
             <button data-testid="paper-live-mode-toggle" onClick={toggleMode} className={`px-3 py-1.5 rounded-full border font-mono text-[10px] uppercase tracking-widest transition-colors duration-150 ${status?.mode === "PAPER" ? "border-amber-700 bg-amber-950/30 text-amber-300 hover:bg-amber-950/60" : "border-emerald-700 bg-emerald-950/30 text-emerald-300 hover:bg-emerald-950/60"}`}>
               MODE · {status?.mode || "…"}
             </button>
@@ -885,6 +935,12 @@ function Dashboard() {
       </header>
 
       <main className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-[1600px] mx-auto">
+        {pairMsg && (
+          <div data-testid="pair-switch-message" className={`rounded border px-3 py-2 text-xs font-mono flex items-center justify-between gap-3 ${pairMsg.level === "ok" ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : pairMsg.level === "warn" ? "border-amber-800 bg-amber-950/30 text-amber-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>
+            <span>{pairMsg.level === "ok" ? "✓" : "⚠"} {pairMsg.text}</span>
+            <button data-testid="pair-switch-dismiss" onClick={() => setPairMsg(null)} className="text-slate-400 hover:text-slate-200">dismiss</button>
+          </div>
+        )}
 
         {/* Portfolio cards */}
         <section className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
@@ -896,7 +952,7 @@ function Dashboard() {
 
         <FeedHealthStrip feed={telemetry?.feed} />
 
-        <AccountPanel status={status} onApply={applyAccount} result={accountResult} />
+        <AccountPanel status={status} onApply={applyAccount} result={accountResult} wallet={wallet} />
 
         {/* Spread monitor grid */}
         <section>

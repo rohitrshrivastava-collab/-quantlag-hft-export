@@ -199,6 +199,7 @@ class Position:
     liq_state: str = ""
     liq_slippage_pct: float = 0.0      # expected one-side entry slippage at the traded notional
     requested_notional_inr: float = 0.0  # pre-shrink slot notional
+    entry_fx: float = 0.0              # USDT/INR used to book the entry; exits are marked at the same rate
 
 
 # ---------------------------------------------------------------------------
@@ -711,9 +712,12 @@ class FXRateService:
                         self.sources.setdefault(name, {})["error"] = str(res)[:80] if isinstance(res, Exception) else "out of range/empty"
                     else:
                         self.sources[name] = {"rate": round(float(res), 4), "ts": now, "error": ""}
-                fresh = sorted(v["rate"] for v in self.sources.values() if v.get("rate") and now - v.get("ts", 0) < self.FRESH_S)
+                fresh = {k: v["rate"] for k, v in self.sources.items() if v.get("rate") and now - v.get("ts", 0) < self.FRESH_S}
                 if fresh:
-                    self.rate = fresh[len(fresh) // 2] if len(fresh) % 2 else (fresh[len(fresh)//2 - 1] + fresh[len(fresh)//2]) / 2
+                    # CoinDCX's own USDT/INR is the rate the exchange actually margins at; others are sanity fallbacks.
+                    # Fixed preference avoids the ±1.5% jumps a plain median makes when one source drops out.
+                    vals = sorted(fresh.values())
+                    self.rate = fresh["coindcx"] if "coindcx" in fresh else (vals[len(vals) // 2] if len(vals) % 2 else (vals[len(vals)//2 - 1] + vals[len(vals)//2]) / 2)
                     self.last_update_ts = now
                 await asyncio.sleep(30)
         except asyncio.CancelledError:
@@ -920,6 +924,8 @@ class BotEngine:
             restored_coins = self._restored_settings.get("coins")
             if restored_coins and list(restored_coins) != list(self._sparkline.keys()):
                 self._reset_universe(list(restored_coins))
+            elif "laggard_exchange" in self._restored_settings:
+                self._build_feeds()
 
     def persist(self) -> None:
         try:
@@ -947,6 +953,52 @@ class BotEngine:
         self.paused = {c for c in self.paused if c in coins}
         self._build_feeds()
         if self.coinswitch_poller: self.coinswitch_poller.coins = coins
+
+    async def set_laggard_exchange(self, exchange: str) -> None:
+        """Switch the traded pair (Binance → coinswitch | coindcx): restarts feeds; refuses while positions are open."""
+        exchange = exchange.strip().lower()
+        if exchange not in ("coinswitch", "coindcx"): raise ValueError("exchange must be coinswitch or coindcx")
+        if exchange == self.cfg.laggard_exchange: return
+        if await self.store.all_open(): raise RuntimeError("close open positions before switching the pair")
+        was_running = self.running
+        if was_running: await self.stop()
+        self.cfg.laggard_exchange = exchange
+        self._build_feeds()
+        self._last_liq = {}
+        self._order_cooldown = {}
+        self._live_missing_keys_warned = False
+        self.persist()
+        await self.store.log("INFO", f"Pair switched to Binance → {exchange.upper()}")
+        if was_running: await self.start()
+        if not self.cfg.paper_trading and self._live_executor_ready():
+            await self.apply_leverage(self.cfg.leverage)
+
+    async def wallet(self) -> Dict[str, Any]:
+        """Futures wallet of the active laggard exchange (normalised: [{currency, balance, locked}])."""
+        ex = self.cfg.laggard_exchange
+        out: Dict[str, Any] = {"exchange": ex, "balances": [], "keys": False, "error": None, "fetched_at": time.time()}
+        try:
+            if ex == "coindcx":
+                if not self.coindcx: return out
+                out["keys"] = True
+                for w in (await self.coindcx.wallet_balance()) or []:
+                    out["balances"].append({"currency": str(w.get("currency_short_name", "")).upper(),
+                                            "balance": float(w.get("balance") or 0), "locked": float(w.get("locked_balance") or 0)})
+                out["margin_currency"] = self.coindcx.margin_currency
+            else:
+                if not self.coinswitch: return out
+                out["keys"] = True
+                wb = await self.coinswitch.wallet_balance()
+                data = wb.get("data", wb) if isinstance(wb, dict) else wb
+                rows = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+                for w in rows:
+                    cur = str(w.get("currency") or w.get("asset") or w.get("currency_short_name") or "USDT").upper()
+                    bal = w.get("total_balance", w.get("balance", w.get("wallet_balance", 0)))
+                    locked = w.get("locked_balance", w.get("blocked_balance", w.get("order_margin", 0)))
+                    out["balances"].append({"currency": cur, "balance": float(bal or 0), "locked": float(locked or 0), "raw": w})
+        except Exception as e:
+            out["error"] = str(e)
+        return out
 
     async def set_coins(self, coins: List[str]) -> None:
         """Swap the traded universe: restarts feeds; refuses while positions are open."""
@@ -1375,6 +1427,10 @@ class BotEngine:
                 "INFO",
                 f"[LIVE] {coin} filled {exec_qty} @ {avg_px} USDT ({status}) fee={fee_usdt} USDT · fill via {fill.get('fill_source') or 'REST'} {fill.get('fill_latency_ms') or '?'} ms")
 
+        # never take profit below break-even: the target must at least cover both taker fees + edge
+        be = (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct + self.cfg.hurdle_extra_pct) / 100.0
+        target = max(target, entry_price * (1 + be)) if direction == "LONG" else min(target, entry_price * (1 - be))
+
         pos = Position(
             id=str(uuid.uuid4()),
             coin=coin, direction=direction,
@@ -1395,6 +1451,7 @@ class BotEngine:
             liq_state=liq_state,
             liq_slippage_pct=liq_slip,
             requested_notional_inr=requested_notional,
+            entry_fx=max(self.fx.rate, 1e-6),
         )
         await self.store.add_open(pos)
         shrink = f" (shrunk from ₹{requested_notional:.0f})" if notional_inr < requested_notional - 0.5 else ""
@@ -1443,12 +1500,16 @@ class BotEngine:
                 await asyncio.sleep(0.3)
         except asyncio.CancelledError: pass
 
+    def _mark_fx(self, pos: Position) -> float:
+        """Rescale a current INR quote into the position's entry-FX frame so FX drift can't fake a target/stop."""
+        return (pos.entry_fx / max(self.fx.rate, 1e-6)) if pos.entry_fx else 1.0
+
     async def _manage_position(self, pos: Position) -> None:
         lagg = self._laggard(pos.coin)
         if not lagg: return
         now = time.time()
-        # mark-to-market
-        cur = lagg.bid if pos.direction == "LONG" else lagg.ask
+        # mark-to-market (in the entry-FX frame)
+        cur = (lagg.bid if pos.direction == "LONG" else lagg.ask) * self._mark_fx(pos)
         reason = None
         if pos.direction == "LONG":
             if cur >= pos.target_price_inr: reason = "TARGET_HIT"
@@ -1465,7 +1526,7 @@ class BotEngine:
         if pos.mode == "PAPER":
             # realistic paper exit: walk the opposite side of the book for our contracts
             liq = self.liquidity(pos.coin, "SHORT" if pos.direction == "LONG" else "LONG", pos.contracts * price)
-            if liq and liq["vwap_inr"] > 0: price = liq["vwap_inr"]
+            if liq and liq["vwap_inr"] > 0: price = liq["vwap_inr"] * self._mark_fx(pos)
         if pos.mode == "LIVE" and self._live_executor_ready():
             if self._order_cooldown.get(pos.coin, 0) > time.time(): return
             # place reduce_only MARKET on opposite side
@@ -1475,7 +1536,7 @@ class BotEngine:
                 exit_order_id = fill["order_id"]
                 exec_qty, avg_px, fee_usdt = fill["exec_qty"], fill["avg_px"], fill["fee"]
                 if exec_qty > 0 and avg_px > 0:
-                    fx = max(self.fx.rate, 1e-6)
+                    fx = pos.entry_fx or max(self.fx.rate, 1e-6)
                     price = avg_px * fx
                     exit_fee_inr = fee_usdt * fx
                     # partial-fill: shrink contracts to what actually closed

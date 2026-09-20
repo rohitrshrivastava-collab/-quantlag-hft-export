@@ -138,7 +138,9 @@ class ShadowExchange:
             liq = self._liq(feed, coin, p["direction"], p["notional_inr"], fx, cfg, leader_fresh)
             entry = (liq.vwap * fx) if (liq and liq.vwap > 0) else (lagg.ask if p["direction"] == "LONG" else lagg.bid)
             stop = entry * (1 - cfg.stop_loss_pct / 100) if p["direction"] == "LONG" else entry * (1 + cfg.stop_loss_pct / 100)
-            self.open[coin] = {**p, "entry": entry, "stop": stop, "contracts": p["notional_inr"] / entry,
+            be = (2 * self.fee_pct + cfg.hurdle_extra_pct) / 100.0
+            target = max(p["target"], entry * (1 + be)) if p["direction"] == "LONG" else min(p["target"], entry * (1 - be))
+            self.open[coin] = {**p, "target": target, "entry": entry, "stop": stop, "contracts": p["notional_inr"] / entry,
                                "opened_at": now, "timeout_at": p["signal_ts"] + cfg.timeout_seconds}
             return
 
@@ -251,6 +253,7 @@ class ShadowRunner:
             "coindcx": ShadowExchange("coindcx", cfg.coindcx_taker_fee_pct, cfg.coindcx_exec_latency_s),
         }
         self.started_at = time.time()
+        self.fx0: Optional[float] = None   # pinned once the FX service has a real quote
 
     def _other_name(self) -> str:
         return "coindcx" if self.engine.cfg.laggard_exchange == "coinswitch" else "coinswitch"
@@ -275,12 +278,15 @@ class ShadowRunner:
             await f.start()
 
     async def _loop(self) -> None:
+        from bot_engine import TopOfBook
         try:
             while True:
                 try:
                     if self.engine.running and self.engine.live_feed:
                         await self._ensure_other_feed()
-                        now = time.time(); fx = max(self.engine.fx.rate, 1e-6); cfg = self.engine.cfg
+                        now = time.time(); fx_live = max(self.engine.fx.rate, 1e-6); cfg = self.engine.cfg
+                        if self.fx0 is None and getattr(self.engine.fx, "last_update_ts", 0): self.fx0 = fx_live
+                        fx = self.fx0 or fx_live   # fixed booking rate: FX drift must not fake PnL / stops
                         slot = self.engine.allocated_per_slot_inr() * max(1, int(cfg.leverage))
                         for name, feed in self.feeds().items():
                             if not feed: continue
@@ -288,7 +294,9 @@ class ShadowRunner:
                             for coin in cfg.coins:
                                 leader = self.engine.live_feed.book.get(coin)
                                 lagg = feed.fresh(coin, cfg.laggard_stale_after_s)
-                                if leader and lagg: sim.step(coin, now, leader, lagg, feed, fx, cfg, slot)
+                                if leader and lagg:
+                                    lagg_fixed = TopOfBook(coin, lagg.bid / fx_live * fx, lagg.ask / fx_live * fx, lagg.ts_ms)
+                                    sim.step(coin, now, leader, lagg_fixed, feed, fx, cfg, slot)
                 except Exception as e:  # keep the comparison alive on data hiccups
                     logger.warning(f"shadow step error: {e}")
                 await asyncio.sleep(0.1)
