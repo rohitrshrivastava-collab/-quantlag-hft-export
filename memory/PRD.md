@@ -184,14 +184,40 @@ SQLite persistence, paper/live toggle.
   0.0075 USDT, cost ≈ 0.008 USDT, position flat. Leverage-update call works.
 - Testing: `iteration_10.json` backend 8/8, frontend pass (no further orders).
 
+### Iteration 11 (2026-06, "CoinDCX order-update WS · Pair B LIVE trial PASSED")
+- `CoinDCXUserStream` (coindcx_client.py): authenticated Socket.IO EIO=3 join of
+  channel `coindcx` (HMAC of `{"channel":"coindcx"}`), consumes `df-order-update`
+  / `df-position-update`; `wait_for_fill` resolves via asyncio.Event per order id
+  (REST `get_order` only every 1 s as safety net). Started/stopped with engine
+  when `LAGGARD_EXCHANGE=coindcx`. Telemetry `feed.user_ws` {connected, joined,
+  order_updates, fills_via_ws/rest, last_fill_latency_ms, last_fill_source};
+  dashboard pill `feed-user-ws-badge` ("DCX FILLS · WS LIVE").
+- `size_qty` snaps entries to `quantity_increment` (floor, lifted to
+  min_notional×1.05; closes rounded to nearest step). `SlotTooSmall` (min order
+  >1.5× slot) → WARN + 10-min per-coin cooldown; order reject → 30 s cooldown;
+  close reject → position KEPT OPEN and retried after 10 s (no phantom closes).
+- backend/.env now `LAGGARD_EXCHANGE="coindcx"`.
+- REAL LIVE TRIAL (₹700, 1 slot, 1x; BTC/ETH/LINK/AVAX paused because their
+  CoinDCX minimums are 25–80 USDT): SHORT ADA 32 @0.2198 → TIMEOUT @0.2202
+  net ₹-2.02; LONG SOL 0.06 @108.14 → TARGET_HIT @108.15 net ₹-0.75. All 4
+  fills via WS (614–939 ms after create ack; create REST ≈1.2 s). Wallet
+  1820.62 → 1816.72 INR, exchange flat. Bot returned to PAPER afterwards.
+- Testing: `iteration_11.json` backend 8/8, frontend pass (1920 + 390 px).
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 
 ## Prioritized backlog
-- P1: Pair B LIVE mode dry-run: LAGGARD_EXCHANGE=coindcx + PAPER_TRADING=false with 1 slot, tiny equity; confirm `_live_market` INR sizing end-to-end.
+- P1: Execution latency: CoinDCX order create REST ≈1.2 s + fill confirm 0.6–0.9 s
+  → ~2 s round trip. Consider pre-warmed aiohttp session / keep-alive for the
+  order path, and widen hurdle or use limit-IOC to survive the delay.
+- P1: Trial economics: both LIVE trades net-negative at 1x/₹700 (fees 0.059% taker
+  ×2 ≈ ₹0.82 per trade). Re-run with hurdle ≥0.15% (replay sweep result) before
+  scaling capital.
 - P2: Scheduled auto-screening (daily re-rank + Telegram proposal, optional auto-apply).
 - P2: Multi-day replay (concatenate several tick files) and sweep over timeout/stop too.
 - P2: Verify CoinSwitch PRO listing of screener picks via `instrument_info` once keys exist.
+- P2: Dynamic volatility-adjusted stop-loss.
 
 ## Deployment
 - EC2 t3.small (Mumbai) recommended. Use `tmux` + `python standalone_bot/run_bot.py`.

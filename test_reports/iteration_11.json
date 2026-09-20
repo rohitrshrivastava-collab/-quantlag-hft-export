@@ -1,0 +1,28 @@
+{
+  "summary": "Iteration 11 - CoinDCX user-WS + telemetry + lifecycle regression. Backend: 8/8 pytest passed (telemetry shape with feed.source=COINDCX_WS, laggard_exchange=coindcx, user_ws {connected,joined,active}=true and numeric counters; /api/config paper_trading=true, coindcx_client_ready=true, num_slots=1, leverage=1; /api/status running=true mode=PAPER; /api/positions/closed items list contains LIVE ADA SHORT/TIMEOUT and LIVE SOL LONG/TARGET_HIT with entry/exit order ids and numeric net_pnl_inr; /api/coindcx/check ok=true margin_currency=INR wallets list; /api/coindcx/test-order without confirm -> HTTP 400; bot stop+start reconnects user WS within ~2s -> feed.source back to COINDCX_WS and user_ws.joined=true; BTC pause/resume ok=true). Frontend at 1920px & 390px: feed-source-badge='SRC · COINDCX WS', feed-user-ws-badge='DCX FILLS · WS LIVE · 0 upd', no horizontal overflow (scrollWidth==clientWidth on both), PAPER mode chip visible. Bot left running in PAPER, laggard=coindcx.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "BenchmarkPanel select", "issues": ["Pre-existing React hydration warning: <span> child inside <option> at App.js line 404 (non-blocking, already flagged in iter10)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter11.py",
+    "/app/test_reports/pytest/iter11.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "user_ws counters (fills_via_ws/fills_via_rest/order_updates) reset to 0 on engine restart; if these are meant to be lifetime metrics for the earlier LIVE trades they should be persisted (currently zero after stop/start). Verified last_fill_source is empty string on freshly-started engine.",
+    "/api/positions/closed returns object {items:[...]} - shape differs from typical list; document in API contract to avoid future integration confusion."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter11.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a - no user auth; CoinDCX keys in backend/.env (real money, never sent confirm:true)",
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Bot is RUNNING in PAPER mode, LAGGARD_EXCHANGE=coindcx. feed.source=COINDCX_WS with user_ws connected+joined+active. Never call /api/coindcx/test-order with confirm:true and never POST /api/bot/mode with paper_trading:false. /api/positions/closed returns {items:[...]} not bare list. Position field is 'direction' not 'side'. Multiple ADA/SOL LIVE closed positions may exist - filter by (direction, close_reason). Engine restart resets user_ws counters to 0 and last_fill_source to ''.",
+  "rca of the issue": "n/a - all tests pass"
+}
