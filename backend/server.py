@@ -92,6 +92,13 @@ class ConfigUpdate(BaseModel):
     min_order_inr: Optional[float] = Field(default=None, ge=1, le=1e6)
     max_entry_frozen_s: Optional[float] = Field(default=None, ge=0.1, le=60)
     spike_persist_ms: Optional[int] = Field(default=None, ge=0, le=10000)
+    max_book_share_pct: Optional[float] = Field(default=None, ge=1, le=100)
+    stop_mode: Optional[str] = Field(default=None, pattern="^(dynamic|fixed)$")
+    vol_window_s: Optional[int] = Field(default=None, ge=60, le=3600)
+    vol_k: Optional[float] = Field(default=None, ge=0.5, le=6)
+    stop_min_pct: Optional[float] = Field(default=None, ge=0.05, le=5)
+    stop_max_pct: Optional[float] = Field(default=None, ge=0.1, le=10)
+    breakeven_floor: Optional[bool] = None
 
 
 class AccountUpdate(BaseModel):
@@ -236,6 +243,13 @@ async def get_config():
         "max_entry_frozen_s": c.max_entry_frozen_s,
         "spike_persist_ms": c.spike_persist_ms,
         "scan_interval_s": c.scan_interval_s,
+        "max_book_share_pct": c.max_book_share_pct,
+        "stop_mode": c.stop_mode,
+        "vol_window_s": c.vol_window_s,
+        "vol_k": c.vol_k,
+        "stop_min_pct": c.stop_min_pct,
+        "stop_max_pct": c.stop_max_pct,
+        "breakeven_floor": c.breakeven_floor,
         "depth_bps": c.depth_bps,
     }
 

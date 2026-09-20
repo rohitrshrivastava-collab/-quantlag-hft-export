@@ -28,10 +28,11 @@ def _pct(xs: List[float], q: float) -> Optional[float]:
 
 
 class ShadowExchange:
-    def __init__(self, name: str, fee_pct: float, latency_s: float) -> None:
+    def __init__(self, name: str, fee_pct: float, latency_s: float, stop_fn=None) -> None:
         self.name = name
         self.fee_pct = fee_pct
         self.latency_s = latency_s
+        self.stop_fn = stop_fn   # coin -> stop % (engine's volatility recommendation)
         self.basis: Dict[str, List[tuple]] = {}
         self.open: Dict[str, Dict[str, Any]] = {}
         self.pending: Dict[str, Dict[str, Any]] = {}      # coin -> entry waiting for exec latency
@@ -117,7 +118,10 @@ class ShadowExchange:
         leader_inr_mid = leader.mid * fx
         gross_pct = (leader_inr_mid - lagg.mid) / lagg.mid * 100.0
         basis = self._basis(coin, gross_pct, now, cfg.basis_window_s, cfg.basis_filter)
-        adj = gross_pct - basis if cfg.basis_filter else gross_pct
+        leader_ref = leader_inr_mid / (1 + basis / 100.0) if cfg.basis_filter else leader_inr_mid
+        long_edge = (leader_ref - lagg.ask) / lagg.ask * 100.0      # Binance above best ask → bullish lag
+        short_edge = (lagg.bid - leader_ref) / lagg.bid * 100.0     # Binance below best bid → bearish lag
+        adj = long_edge if long_edge > 0 else (-short_edge if short_edge > 0 else 0.0)
         self.spreads_abs.append(abs(adj))
         if len(self.spreads_abs) > 5000: self.spreads_abs = self.spreads_abs[-5000:]
         hurdle = self.hurdle(cfg)
@@ -138,9 +142,12 @@ class ShadowExchange:
             self.pending.pop(coin)
             liq = self._liq(feed, coin, p["direction"], p["notional_inr"], fx, cfg, leader_fresh)
             entry = (liq.vwap * fx) if (liq and liq.vwap > 0) else (lagg.ask if p["direction"] == "LONG" else lagg.bid)
-            stop = entry * (1 - cfg.stop_loss_pct / 100) if p["direction"] == "LONG" else entry * (1 + cfg.stop_loss_pct / 100)
+            stop_pct = self.stop_fn(coin) if self.stop_fn else cfg.stop_loss_pct
+            stop = entry * (1 - stop_pct / 100) if p["direction"] == "LONG" else entry * (1 + stop_pct / 100)
             be = (2 * self.fee_pct + cfg.hurdle_extra_pct) / 100.0
-            target = max(p["target"], entry * (1 + be)) if p["direction"] == "LONG" else min(p["target"], entry * (1 - be))
+            target = p["target"]
+            if cfg.breakeven_floor:
+                target = max(p["target"], entry * (1 + be)) if p["direction"] == "LONG" else min(p["target"], entry * (1 - be))
             self.open[coin] = {**p, "target": target, "entry": entry, "stop": stop, "contracts": p["notional_inr"] / entry,
                                "opened_at": now, "timeout_at": p["signal_ts"] + cfg.timeout_seconds}
             return
@@ -169,13 +176,14 @@ class ShadowExchange:
         if p: return
 
         # entry signal (+ spike-persistence: must stay above the hurdle for spike_persist_ms)
-        side = "LONG" if adj > hurdle else "SHORT" if -adj > hurdle else None
+        side = "LONG" if long_edge > hurdle else "SHORT" if short_edge > hurdle else None
         if side is None:
             self._armed.pop(coin, None); return
         armed = self._armed.get(coin)
-        if not armed or armed[0] != side:
-            self._armed[coin] = (side, now); return
-        if (now - armed[1]) * 1000 < cfg.spike_persist_ms: return
+        if cfg.spike_persist_ms > 0:
+            if not armed or armed[0] != side:
+                self._armed[coin] = (side, now); return
+            if (now - armed[1]) * 1000 < cfg.spike_persist_ms: return
         self._armed.pop(coin, None)
         direction = side
         self.signals += 1
@@ -187,10 +195,12 @@ class ShadowExchange:
             if liq.frozen_s > cfg.max_entry_frozen_s:
                 self.stale_skips += 1; return
             fillable_inr = liq.fillable * fx
-            if fillable_inr < notional:
-                if fillable_inr < cfg.min_order_inr:
+            share_cap = liq.depth_notional * fx * cfg.max_book_share_pct / 100.0
+            allowed = min(fillable_inr, share_cap) if share_cap > 0 else fillable_inr
+            if allowed < notional:
+                if allowed < cfg.min_order_inr:
                     self.thin_skips += 1; return
-                notional = fillable_inr; self.shrunk += 1
+                notional = allowed; self.shrunk += 1
                 liq = self._liq(feed, coin, direction, notional, fx, cfg, leader_fresh) or liq
             if abs(adj) < self.hurdle(cfg, liq.slippage_pct):
                 self.edge_skips += 1; return
@@ -258,9 +268,10 @@ class ShadowRunner:
 
     def reset(self) -> None:
         cfg = self.engine.cfg
+        stop_fn = lambda coin: self.engine.recommended_stop_pct(coin)[0]
         self.sims = {
-            "coinswitch": ShadowExchange("coinswitch", cfg.coinswitch_taker_fee_pct, cfg.coinswitch_exec_latency_s),
-            "coindcx": ShadowExchange("coindcx", cfg.coindcx_taker_fee_pct, cfg.coindcx_exec_latency_s),
+            "coinswitch": ShadowExchange("coinswitch", cfg.coinswitch_taker_fee_pct, cfg.coinswitch_exec_latency_s, stop_fn),
+            "coindcx": ShadowExchange("coindcx", cfg.coindcx_taker_fee_pct, cfg.coindcx_exec_latency_s, stop_fn),
         }
         self.started_at = time.time()
         self.fx0: Optional[float] = None   # pinned once the FX service has a real quote

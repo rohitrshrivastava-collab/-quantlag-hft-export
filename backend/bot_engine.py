@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import math
+from collections import deque
 import os
 from pathlib import Path
 import random
@@ -100,8 +101,15 @@ class BotConfig:
     depth_bps: float = 10.0                # resting-depth window reported per coin
     min_order_inr: float = 100.0           # shrink floor: skip if the book can't absorb at least this
     max_entry_frozen_s: float = 1.0        # fresh-book filter: laggard top-5 must have changed within this many s
-    spike_persist_ms: int = 300            # Binance dislocation must stay above the hurdle this long before we fire
+    spike_persist_ms: int = 300            # Binance dislocation must stay above the hurdle this long before we fire (0 = immediate)
     scan_interval_s: float = 0.1
+    max_book_share_pct: float = 25.0       # order notional ≤ this % of laggard liquidity within depth_bps of top
+    stop_mode: str = "dynamic"             # dynamic (volatility-scaled) | fixed (stop_loss_pct)
+    vol_window_s: int = 300                # realised-vol lookback on the laggard mid
+    vol_k: float = 2.0                     # stop = k × σ over the timeout horizon
+    stop_min_pct: float = 0.15
+    stop_max_pct: float = 1.0
+    breakeven_floor: bool = True           # target may never sit below entry + fees
     # shadow comparison assumptions (per laggard exchange)
     coinswitch_taker_fee_pct: float = 0.065   # from instrument_info taker_fee_rate 0.00065
     coindcx_taker_fee_pct: float = 0.059
@@ -154,6 +162,13 @@ class BotConfig:
             max_entry_frozen_s=_f("MAX_ENTRY_FROZEN_S", 1.0),
             spike_persist_ms=_i("SPIKE_PERSIST_MS", 300),
             scan_interval_s=_f("SCAN_INTERVAL_S", 0.1),
+            max_book_share_pct=_f("MAX_BOOK_SHARE_PCT", 25.0),
+            stop_mode=os.environ.get("STOP_MODE", "dynamic").strip().lower(),
+            vol_window_s=_i("VOL_WINDOW_S", 300),
+            vol_k=_f("VOL_K", 2.0),
+            stop_min_pct=_f("STOP_MIN_PCT", 0.15),
+            stop_max_pct=_f("STOP_MAX_PCT", 1.0),
+            breakeven_floor=_b("BREAKEVEN_FLOOR", True),
             coinswitch_taker_fee_pct=_f("COINSWITCH_TAKER_FEE_PCT", 0.065),
             coindcx_taker_fee_pct=_f("COINDCX_TAKER_FEE_PCT", 0.059),
             coinswitch_exec_latency_s=_f("COINSWITCH_EXEC_LATENCY_S", 1.0),
@@ -209,6 +224,8 @@ class Position:
     liq_slippage_pct: float = 0.0      # expected one-side entry slippage at the traded notional
     requested_notional_inr: float = 0.0  # pre-shrink slot notional
     entry_fx: float = 0.0              # USDT/INR used to book the entry; exits are marked at the same rate
+    stop_pct: float = 0.0              # hard stop applied at entry (%)
+    stop_basis: str = ""               # dynamic | fixed
 
 
 # ---------------------------------------------------------------------------
@@ -928,6 +945,9 @@ class BotEngine:
         self._armed: Dict[str, Tuple[str, float]] = {}
         self._last_slow_ts: Dict[str, float] = {}
         self.spike_stats: Dict[str, int] = {"crossings": 0, "persisted": 0, "reverted": 0}
+        self._last_edges: Dict[str, Tuple[float, float]] = {}
+        self._mid_hist: Dict[str, deque] = {}
+        self._vol_cache: Dict[str, Tuple[float, float, int]] = {}   # coin -> (computed_at, sigma_pct_per_step, n)
         self.total_create_ms = self.total_fill_confirm_ms = 0.0
         self.live_fill_count = 0
         self._live_missing_keys_warned = False
@@ -964,6 +984,9 @@ class BotEngine:
         self._heat = {c: {} for c in coins}
         self._basis_samples = {c: [] for c in coins}
         self._last_liq = {}
+        self._last_edges = {}
+        self._mid_hist = {}
+        self._vol_cache = {}
         self.paused = {c for c in self.paused if c in coins}
         self._build_feeds()
         if self.coinswitch_poller: self.coinswitch_poller.coins = coins
@@ -1177,6 +1200,36 @@ class BotEngine:
             "restored_settings": self._restored_settings,
         }
 
+    # --- volatility-scaled hard stop ---------------------------------------------
+    def _record_mid(self, coin: str, ts: float, mid: float) -> None:
+        h = self._mid_hist.setdefault(coin, deque(maxlen=2000))
+        h.append((ts, mid))
+
+    def volatility_pct(self, coin: str) -> Tuple[Optional[float], int]:
+        """σ (in %) of the laggard mid over the trade horizon (timeout_seconds), from ~0.4 s log returns."""
+        cached = self._vol_cache.get(coin)
+        now = time.time()
+        if cached and now - cached[0] < 5: return cached[1], cached[2]
+        h = self._mid_hist.get(coin)
+        if not h or len(h) < 30: return None, len(h) if h else 0
+        cutoff = now - self.cfg.vol_window_s
+        pts = [(t, m) for t, m in h if t >= cutoff and m > 0]
+        if len(pts) < 30: return None, len(pts)
+        rets = [math.log(pts[i][1] / pts[i - 1][1]) for i in range(1, len(pts))]
+        mean = sum(rets) / len(rets)
+        var = sum((r - mean) ** 2 for r in rets) / max(1, len(rets) - 1)
+        step_s = max(0.05, (pts[-1][0] - pts[0][0]) / max(1, len(pts) - 1))
+        sigma_h = math.sqrt(var) * math.sqrt(self.cfg.timeout_seconds / step_s) * 100.0
+        self._vol_cache[coin] = (now, sigma_h, len(pts))
+        return sigma_h, len(pts)
+
+    def recommended_stop_pct(self, coin: str) -> Tuple[float, str]:
+        """Dynamic: clamp(k·σ_horizon, min, max); falls back to the fixed stop until enough samples exist."""
+        if self.cfg.stop_mode != "dynamic": return self.cfg.stop_loss_pct, "fixed"
+        sigma, n = self.volatility_pct(coin)
+        if sigma is None: return self.cfg.stop_loss_pct, "fixed (warming up)"
+        return round(min(self.cfg.stop_max_pct, max(self.cfg.stop_min_pct, self.cfg.vol_k * sigma)), 4), "dynamic"
+
     def hurdle_pct(self) -> float:
         c = self.cfg
         return c.entry_taker_fee_pct + c.exit_taker_fee_pct + c.slippage_buffer_pct + c.hurdle_extra_pct
@@ -1273,17 +1326,24 @@ class BotEngine:
         # convert leader USDT mid → INR reference for like-with-like comparison
         leader_inr_mid = leader.mid * fx
         # gross divergence % vs laggard mid
-        gross_pct = (leader_inr_mid - lagg.mid) / lagg.mid * 100.0
+        gross_pct = (leader_inr_mid - lagg.mid) / lagg.mid * 100.0      # mid-vs-mid: used only for the basis estimate
         now = time.time()
-        slow = now - self._last_slow_ts.get(coin, 0.0) >= 0.4    # 2.5 Hz for recorder/sparkline; scan itself runs faster
+        slow = now - self._last_slow_ts.get(coin, 0.0) >= 0.4    # 2.5 Hz for recorder/sparkline/vol; scan itself runs faster
         if slow:
             self._last_slow_ts[coin] = now
             self.recorder.record(coin, leader.bid, leader.ask, lagg.bid, lagg.ask, fx)
+            self._record_mid(coin, now, lagg.mid)
         basis = self._update_basis(coin, gross_pct)
-        adj_pct = gross_pct - basis if self.cfg.basis_filter else gross_pct
+        # --- signal: Binance price vs the laggard's TOP OF BOOK (never LTP, never mid) ---
+        # Bullish lag: Binance > best ask → LONG edge; Bearish lag: Binance < best bid → SHORT edge.
+        leader_ref = leader_inr_mid / (1 + basis / 100.0) if self.cfg.basis_filter else leader_inr_mid
+        long_edge = (leader_ref - lagg.ask) / lagg.ask * 100.0
+        short_edge = (lagg.bid - leader_ref) / lagg.bid * 100.0
+        adj_pct = long_edge if long_edge > 0 else (-short_edge if short_edge > 0 else 0.0)   # 0 = Binance inside the laggard spread
         self._last_gross_pct[coin] = gross_pct
         self._last_basis_pct[coin] = basis
         self._last_spread_pct[coin] = adj_pct
+        self._last_edges[coin] = (round(long_edge, 5), round(short_edge, 5))
         if slow:
             sp = self._sparkline[coin]; sp.append(adj_pct)
             if len(sp) > 60: self._sparkline[coin] = sp[-60:]
@@ -1301,27 +1361,30 @@ class BotEngine:
             return
 
         hurdle = self.hurdle_pct()
-        side = "LONG" if adj_pct > hurdle else "SHORT" if -adj_pct > hurdle else None
+        side = "LONG" if long_edge > hurdle else "SHORT" if short_edge > hurdle else None
         if side is None:
             if coin in self._armed:
                 self._armed.pop(coin)
                 self.spike_stats["reverted"] += 1      # crossed the hurdle but fell back before persisting
             self._last_signal_state[coin] = "WAITING"
             return
-        # spike-persistence filter: the dislocation must hold above the hurdle for spike_persist_ms
+        # spike-persistence filter (user setting; 0 ms = execute immediately)
         armed = self._armed.get(coin)
-        if not armed or armed[0] != side:
-            self._armed[coin] = (side, now)
+        if self.cfg.spike_persist_ms > 0:
+            if not armed or armed[0] != side:
+                self._armed[coin] = (side, now)
+                self.spike_stats["crossings"] += 1
+                self._last_signal_state[coin] = f"ARMING_{side}"
+                return
+            if (now - armed[1]) * 1000 < self.cfg.spike_persist_ms:
+                self._last_signal_state[coin] = f"ARMING_{side}"
+                return
+        else:
             self.spike_stats["crossings"] += 1
-            self._last_signal_state[coin] = f"ARMING_{side}"
-            return
-        if (now - armed[1]) * 1000 < self.cfg.spike_persist_ms:
-            self._last_signal_state[coin] = f"ARMING_{side}"
-            return
         self._armed.pop(coin, None)
         self.spike_stats["persisted"] += 1
-        # basis-adjusted catch-up target: leader price net of the persistent offset
-        target_ref = leader_inr_mid / (1 + basis / 100.0) if self.cfg.basis_filter else leader_inr_mid
+        # catch-up target = Binance benchmark at entry (basis-adjusted)
+        target_ref = leader_ref
         self._last_signal_state[coin] = f"HURDLE_MET_{side}"
         await self._open_position(coin, side, leader, lagg, target_ref, basis, adj_pct)
 
@@ -1416,12 +1479,15 @@ class BotEngine:
                 self.liq_stats["stale_skips"] = self.liq_stats.get("stale_skips", 0) + 1
                 self._last_signal_state[coin] = "STALE_BOOK"
                 return
-            if liq["fillable_inr"] < notional_inr:
-                if liq["fillable_inr"] < self.cfg.min_order_inr:
+            # order-book share cap: never take more than max_book_share_pct of the liquidity near the top
+            share_cap = liq["depth_inr"] * self.cfg.max_book_share_pct / 100.0
+            allowed = min(liq["fillable_inr"], share_cap) if share_cap > 0 else liq["fillable_inr"]
+            if allowed < notional_inr:
+                if allowed < self.cfg.min_order_inr:
                     self.liq_stats["thin_skips"] += 1
                     self._last_signal_state[coin] = "THIN"
                     return
-                notional_inr = liq["fillable_inr"]
+                notional_inr = allowed
                 size_inr = notional_inr / lev
                 self.liq_stats["shrunk"] += 1
                 liq = self.liquidity(coin, direction, notional_inr) or liq
@@ -1433,8 +1499,9 @@ class BotEngine:
             if liq["vwap_inr"] > 0: entry_price = liq["vwap_inr"]
         contracts = notional_inr / entry_price
         target = leader_inr_mid
-        stop = entry_price * (1 - self.cfg.stop_loss_pct/100.0) if direction == "LONG" \
-               else entry_price * (1 + self.cfg.stop_loss_pct/100.0)
+        stop_pct, stop_basis = self.recommended_stop_pct(coin)
+        stop = entry_price * (1 - stop_pct/100.0) if direction == "LONG" \
+               else entry_price * (1 + stop_pct/100.0)
         latency_ms = 0.0
         entry_order_id: Optional[str] = None
         entry_fee_inr = 0.0
@@ -1493,15 +1560,16 @@ class BotEngine:
             size_inr = notional_inr / lev                 # margin actually committed
             entry_fee_inr = fee_usdt * fx
             target = leader_inr_mid
-            stop = entry_price * (1 - self.cfg.stop_loss_pct/100.0) if direction == "LONG" \
-                   else entry_price * (1 + self.cfg.stop_loss_pct/100.0)
+            stop = entry_price * (1 - stop_pct/100.0) if direction == "LONG" \
+                   else entry_price * (1 + stop_pct/100.0)
             await self.store.log(
                 "INFO",
-                f"[LIVE] {coin} filled {exec_qty} @ {avg_px} USDT ({status}) fee={fee_usdt} USDT · create {self.coindcx.last_create_ms if self.coindcx else '?'} ms · fill via {fill.get('fill_source') or 'REST'} {fill.get('fill_latency_ms') or '?'} ms")
+                f"[LIVE] {coin} filled {exec_qty} @ {avg_px} USDT ({status}) fee={fee_usdt} USDT · create {fill.get('create_ms') or '?'} ms · fill via {fill.get('fill_source') or 'REST'} {fill.get('fill_latency_ms') or '?'} ms")
 
-        # never take profit below break-even: the target must at least cover both taker fees + edge
-        be = (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct + self.cfg.hurdle_extra_pct) / 100.0
-        target = max(target, entry_price * (1 + be)) if direction == "LONG" else min(target, entry_price * (1 - be))
+        # break-even floor (configurable): the target may not sit below entry + both taker fees + edge
+        if self.cfg.breakeven_floor:
+            be = (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct + self.cfg.hurdle_extra_pct) / 100.0
+            target = max(target, entry_price * (1 + be)) if direction == "LONG" else min(target, entry_price * (1 - be))
 
         pos = Position(
             id=str(uuid.uuid4()),
@@ -1526,10 +1594,12 @@ class BotEngine:
             liq_slippage_pct=liq_slip,
             requested_notional_inr=requested_notional,
             entry_fx=max(self.fx.rate, 1e-6),
+            stop_pct=stop_pct,
+            stop_basis=stop_basis,
         )
         await self.store.add_open(pos)
         shrink = f" (shrunk from ₹{requested_notional:.0f})" if notional_inr < requested_notional - 0.5 else ""
-        await self.store.log("TRADE", f"OPEN {direction} {coin} ₹{size_inr:.2f}×{lev} @ {entry_price:.6f}{shrink} · book {liq_state or 'n/a'} slip {liq_slip:.3f}%")
+        await self.store.log("TRADE", f"OPEN {direction} {coin} ₹{size_inr:.2f}×{lev} @ {entry_price:.6f}{shrink} · book {liq_state or 'n/a'} slip {liq_slip:.3f}% · stop {stop_pct:.3f}% ({stop_basis}) · target {target:.6f}")
         await self.telegram.send(
             f"🟢 <b>OPEN {direction}</b> {coin}\n"
             f"Margin: ₹{size_inr:.2f} × {lev}x = ₹{notional_inr:.2f} ({contracts:.6f} contracts)\n"
@@ -1818,5 +1888,10 @@ class BotEngine:
                 "near_hurdle_hits_60s": sum(1 for r in heat if abs(r) >= self.NEAR_HURDLE_RATIO),
                 "peak_ratio_60s": round(max((abs(r) for r in heat), default=0.0), 3),
                 "liquidity": self._last_liq.get(c),
+                "long_edge_pct": self._last_edges.get(c, (0.0, 0.0))[0],
+                "short_edge_pct": self._last_edges.get(c, (0.0, 0.0))[1],
+                "vol_pct": (lambda v: round(v[0], 4) if v[0] is not None else None)(self.volatility_pct(c)),
+                "recommended_stop_pct": self.recommended_stop_pct(c)[0],
+                "stop_basis": self.recommended_stop_pct(c)[1],
             })
         return out

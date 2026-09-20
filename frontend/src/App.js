@@ -766,6 +766,12 @@ function Dashboard() {
       min_order_inr: Number(cfgDraft.min_order_inr),
       max_entry_frozen_s: Number(cfgDraft.max_entry_frozen_s),
       spike_persist_ms: Math.round(Number(cfgDraft.spike_persist_ms)),
+      max_book_share_pct: Number(cfgDraft.max_book_share_pct),
+      vol_k: Number(cfgDraft.vol_k),
+      stop_min_pct: Number(cfgDraft.stop_min_pct),
+      stop_max_pct: Number(cfgDraft.stop_max_pct),
+      stop_mode: cfgDraft.stop_mode,
+      breakeven_floor: !!cfgDraft.breakeven_floor,
     });
     setSaving(false);
     pull();
@@ -1008,6 +1014,11 @@ function Dashboard() {
                     <div>CSW bid <span className="text-slate-300">{fmtNum(sp.coinswitch_bid, 4)}</span></div>
                     <div className="col-span-2">peak 60s <span data-testid={`spread-peak-ratio-${sp.coin}`} className="text-slate-300">{Math.round((sp.peak_ratio_60s || 0) * 100)}%</span> of hurdle · basis <span data-testid={`spread-basis-${sp.coin}`} className="text-purple-300">{(sp.basis_pct ?? 0).toFixed(3)}%</span></div>
                     <LiquidityRow liq={sp.liquidity} coin={sp.coin} />
+                    <div data-testid={`spread-edges-${sp.coin}`} className="col-span-2 flex items-center gap-2 flex-wrap">
+                      <span>vs ask <span className={sp.long_edge_pct > 0 ? "text-emerald-300" : "text-slate-500"}>{(sp.long_edge_pct ?? 0) > 0 ? "+" : ""}{(sp.long_edge_pct ?? 0).toFixed(3)}%</span></span>
+                      <span>vs bid <span className={sp.short_edge_pct > 0 ? "text-rose-300" : "text-slate-500"}>{(sp.short_edge_pct ?? 0) > 0 ? "+" : ""}{(sp.short_edge_pct ?? 0).toFixed(3)}%</span></span>
+                      <span title={`σ over timeout horizon ${sp.vol_pct ?? "—"}%`}>stop <span data-testid={`spread-stop-${sp.coin}`} className="text-amber-300">{(sp.recommended_stop_pct ?? 0).toFixed(3)}%</span> <span className="text-slate-600">{sp.stop_basis}</span></span>
+                    </div>
                   </div>
                 </div>
               );
@@ -1136,6 +1147,21 @@ function Dashboard() {
               </label>
             )}
             {cfgDraft && (
+              <div className="mb-3 grid grid-cols-2 gap-3 text-xs">
+                <label data-testid="stop-mode-toggle" className="flex items-center justify-between gap-3 rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2">
+                  <span className="font-mono text-slate-300">Stop-loss <span className="text-slate-500">· {cfgDraft.stop_mode === "dynamic" ? `k·σ over ${cfgDraft.timeout_seconds}s, clamped` : `fixed ${cfgDraft.stop_loss_pct}%`}</span></span>
+                  <select data-testid="stop-mode-select" value={cfgDraft.stop_mode || "dynamic"} onChange={(e) => setCfgDraft({ ...cfgDraft, stop_mode: e.target.value })} className="bg-[#121721] border border-[#1E2638] rounded px-2 py-1 font-mono text-slate-200 text-xs">
+                    <option value="dynamic">dynamic (volatility)</option>
+                    <option value="fixed">fixed %</option>
+                  </select>
+                </label>
+                <label data-testid="breakeven-floor-toggle" className="flex items-center justify-between gap-3 rounded border border-[#1E2638] bg-[#0A0D12] px-3 py-2">
+                  <span className="font-mono text-slate-300">Break-even floor <span className="text-slate-500">· target ≥ entry + fees</span></span>
+                  <input data-testid="breakeven-floor-checkbox" type="checkbox" checked={!!cfgDraft.breakeven_floor} onChange={(e) => setCfgDraft({ ...cfgDraft, breakeven_floor: e.target.checked })} className="h-4 w-4 accent-purple-500" />
+                </label>
+              </div>
+            )}
+            {cfgDraft && (
               <div className="grid grid-cols-2 gap-3 text-xs">
                 {[
                   ["entry_taker_fee_pct", "Entry Fee %", "config-fee-percentage-input"],
@@ -1149,6 +1175,10 @@ function Dashboard() {
                   ["min_order_inr", "Shrink floor ₹", "config-min-order-input"],
                   ["max_entry_frozen_s", "Fresh book ≤ (s)", "config-fresh-book-input"],
                   ["spike_persist_ms", "Spike persist (ms)", "config-spike-persist-input"],
+                  ["max_book_share_pct", "Max book share %", "config-book-share-input"],
+                  ["vol_k", "Stop = k·σ (k)", "config-vol-k-input"],
+                  ["stop_min_pct", "Stop min %", "config-stop-min-input"],
+                  ["stop_max_pct", "Stop max %", "config-stop-max-input"],
                 ].map(([k, label, tid]) => (
                   <label key={k} className="block">
                     <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">{label}</span>
