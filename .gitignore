@@ -86,3 +86,4 @@ android-sdk/
 benchmark/last_result.json
 data/
 frontend/node_modules/.cache/default-development/0.pack
+data/ticks/2026-09-20.jsonl

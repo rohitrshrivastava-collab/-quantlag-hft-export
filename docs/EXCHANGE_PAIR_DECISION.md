@@ -206,3 +206,19 @@ What *would* change the answer (in order of leverage):
   (maker fee 0.025 % on CoinDCX) — flips the fee drag and turns the lag into edge.
 - Re-run `/api/compare` for ≥1 h at IST market-open (09:00–10:30) and US-open (19:00–20:30)
   when Binance moves are larger and Indian books freeze more.
+
+### 5.5 Measured execution path — CoinSwitch PRO vs CoinDCX (live fills, 2026-06)
+
+| | CoinSwitch PRO (USDT-M) | CoinDCX Futures (INR-M) |
+|---|---|---|
+| Order create REST (warm keep-alive) | **≈420 ms** (1.08 s cold) | **≈290–450 ms** (1.2 s cold) |
+| Exchange-side execution (created_at → updated_at) | ≈400 ms | n/a (not exposed) |
+| Fill confirmation available to us | REST poll only, `data.order.status` RAISED → EXECUTED; 20 req/min budget shared with creates → 0.5 s polling ⇒ **≈0.9–2.0 s** | Authenticated WS push `df-order-update` **≈620–650 ms** after create ack |
+| Total signal → booked fill | ≈1.3–2.4 s | ≈1.0–1.3 s |
+| Taker fee (measured from wallet delta) | 0.065–0.068 %/side (`execution_fee` field unit is bogus — constant 0.57) | 0.059 %/side |
+| Margin currency / min order | USDT only (spot INR must be converted + transferred in-app); DOGE ≥ 87, XRP ≥ 5.4, SOL ≥ 0.1 | INR or USDT; ≈ 6 USDT min notional |
+| Lot sizing | `base_quantity_step_size`, `min_base_quantity` | `quantity_increment`, `min_notional` |
+
+Bottom line: creates are equally fast once the connection is warm; CoinDCX wins on fill
+visibility (WS push vs rate-limited polling), fee and INR margin. CoinSwitch's only edge is the
+2× larger mean divergence — which §5.3 shows is mostly stale/frozen quotes.

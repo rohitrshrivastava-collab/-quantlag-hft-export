@@ -1478,6 +1478,12 @@ class BotEngine:
             if exec_qty <= 0 or avg_px <= 0:
                 await self.store.log(
                     "WARN", f"[LIVE] {coin} order {status} exec_qty=0 order_id={entry_order_id}")
+                if self.cfg.laggard_exchange == "coinswitch" and str(status).upper() not in ("EXECUTED", "CANCELLED", "REJECTED", "EXPIRED"):
+                    try:
+                        await self.coinswitch.cancel_order(entry_order_id)   # never leave an unbooked order that could fill later
+                        await self.store.log("WARN", f"[LIVE] {coin} unfilled order {entry_order_id} cancelled")
+                    except Exception as e:
+                        await self.store.log("ERROR", f"[LIVE] {coin} cancel of {entry_order_id} failed: {e} — check the exchange for an orphan position")
                 return
             # translate to engine's INR bookkeeping using current FX
             lev = int(fill.get("leverage") or lev)       # exchange may cap leverage for the size
@@ -1567,12 +1573,14 @@ class BotEngine:
             raise SlotTooSmall(f"{coin} CoinSwitch minimum ≈ {sized * price_usdt:.2f} USDT exceeds slot notional {qty * price_usdt:.2f} USDT")
         placed = await self.coinswitch.place_order(symbol=f"{coin}USDT", side=side, order_type="MARKET",
                                                    quantity=sized, reduce_only=reduce_only)
-        oid = (placed.get("data") or {}).get("order_id")
+        oid = self.coinswitch.order_data(placed).get("order_id")
         if not oid: raise RuntimeError(f"CoinSwitch place_order missing order_id: {placed}")
-        d = (await self.coinswitch.wait_for_fill(oid, timeout_s=self.cfg.live_order_timeout_s)).get("data") or {}
-        return {"order_id": oid, "exec_qty": float(d.get("exec_quantity") or 0),
-                "avg_px": float(d.get("avg_execution_price") or 0), "fee": float(d.get("execution_fee") or 0),
-                "status": d.get("status", ""), "fill_source": "REST",
+        d = await self.coinswitch.wait_for_fill(oid, timeout_s=self.cfg.live_order_timeout_s, placed=placed)
+        exec_qty = float(d.get("exec_quantity") or 0); avg_px = float(d.get("avg_execution_price") or 0)
+        # execution_fee's unit is undocumented (observed 0.57 on a 7.6 USDT fill) → derive from the taker rate instead
+        taker = float((await self.coinswitch.spec(f"{coin}USDT")).get("taker_fee_rate") or 0.00065)
+        return {"order_id": oid, "exec_qty": exec_qty, "avg_px": avg_px, "fee": exec_qty * avg_px * taker,
+                "status": d.get("status", ""), "fill_source": "CREATE" if self.coinswitch.last_fill_latency_ms == 0 else "REST",
                 "fill_latency_ms": self.coinswitch.last_fill_latency_ms, "create_ms": self.coinswitch.last_create_ms}
 
     async def _position_manager_loop(self) -> None:

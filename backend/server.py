@@ -173,6 +173,9 @@ async def coinswitch_trial_watcher() -> None:
                 TRIAL["waiting"] = usdt < 4.0
                 if usdt >= 4.0 and not await ENGINE.store.all_open():
                     equity = round(usdt * max(ENGINE.fx.rate, 1e-6) * 0.98, 2)
+                    if ENGINE.cfg.num_slots == 1 and int(ENGINE.cfg.leverage) == 10 and abs(ENGINE.equity_inr - equity) / max(equity, 1) < 0.1:
+                        TRIAL.update(armed=True, waiting=False, message=f"CoinSwitch trial active: {usdt:.2f} USDT, equity ₹{ENGINE.equity_inr:.2f}, 1 slot, 10x")
+                        continue   # already armed before a reload — don't reset stats again
                     await ENGINE.reset_account(equity)
                     ENGINE.cfg.num_slots = 1
                     errors = await ENGINE.apply_leverage(10)

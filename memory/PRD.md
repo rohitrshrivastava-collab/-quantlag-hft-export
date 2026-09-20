@@ -289,6 +289,17 @@ SQLite persistence, paper/live toggle.
 - User currently LIVE on pair CoinSwitch (4 slots, 10x, equity ₹1675) — orders will be
   rejected for margin until funded; harmless.
 
+### Iteration 17 (2026-06, "CoinSwitch live loop measured")
+- User moved 5 USDT into the CoinSwitch futures wallet; watcher armed (equity ₹488, 1 slot, 10x).
+- Two real DOGE round-trips (87 DOGE ≈ 7.6 USDT) on CoinSwitch measured create ≈420 ms warm,
+  exchange execution ≈400 ms, fill visible via REST poll ≈0.9–2.0 s (20/min order budget →
+  0.5 s polling); fee ≈0.068 %/side from wallet delta (`execution_fee` constant 0.57 = bogus
+  unit). Wallet 5.0055 → 4.9847 USDT. Docs §5.5.
+- Bugs fixed: `get_order_status` payload is `data.order` (was `data` → fills never seen);
+  create returns `RAISED` so polling is mandatory; unfilled RAISED orders are cancelled to
+  avoid orphans; fee derived from `taker_fee_rate`; trial watcher idempotent across reloads.
+- User then switched the pair back to CoinDCX (₹1740, 2 slots, 10x) from the dashboard.
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 

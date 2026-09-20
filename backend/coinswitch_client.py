@@ -70,6 +70,7 @@ class CoinSwitchFuturesClient:
         self.last_warm_ms: Optional[int] = None
         self.last_warm_error: str = ""
         self.fills_via_rest = 0
+        self.fills_via_create = 0   # market order already terminal in the create response
 
     async def _session(self) -> aiohttp.ClientSession:
         """One warm keep-alive session so order placement skips DNS+TCP+TLS."""
@@ -222,25 +223,36 @@ class CoinSwitchFuturesClient:
         prec = int(sp.get("quantity_precision", 8) or 0)
         return float(f"{q:.{prec}f}")
 
+    @staticmethod
+    def order_data(resp: Dict[str, Any]) -> Dict[str, Any]:
+        """Order payload lives at data.order (GET status) or data (POST create)."""
+        d = resp.get("data") if isinstance(resp, dict) else None
+        d = d or {}
+        return d.get("order") if isinstance(d.get("order"), dict) else d
+
     async def wait_for_fill(self, order_id: str, timeout_s: float = 5.0,
-                            poll_s: float = 0.25) -> Dict[str, Any]:
-        """Poll get_order_status until terminal or timeout.
-        Terminal (per docs): EXECUTED, PARTIALLY_EXECUTED, CANCELLED, REJECTED, EXPIRED.
-        (For Futures, PARTIALLY_EXECUTED is terminal — the unfilled remainder is dead.)
+                            poll_s: float = 0.5, placed: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Return the terminal order dict. Create returns status RAISED; the exchange executes market orders
+        ~400 ms later, so poll at 0.5 s (order endpoints share a 20/min budget → ≤ ~4 GETs per order).
+        Terminal: EXECUTED, PARTIALLY_EXECUTED, CANCELLED, REJECTED, EXPIRED.
         """
         terminal = {"EXECUTED", "PARTIALLY_EXECUTED", "CANCELLED", "REJECTED", "EXPIRED"}
         t0 = time.time()
+        last: Dict[str, Any] = self.order_data(placed) if placed else {}
+        if last.get("status") in terminal:
+            self.last_fill_latency_ms = 0
+            self.fills_via_create += 1
+            return last
         deadline = t0 + timeout_s
-        last: Dict[str, Any] = {}
+        first = True
         while time.time() < deadline:
+            await asyncio.sleep(0.45 if first else poll_s); first = False
             try:
-                last = await self.get_order_status(order_id)
+                last = self.order_data(await self.get_order_status(order_id)) or last
             except CoinSwitchError:
-                await asyncio.sleep(poll_s); continue
-            status = (last.get("data", {}) or {}).get("status", "")
-            if status in terminal:
+                continue
+            if last.get("status") in terminal:
                 self.fills_via_rest += 1
                 self.last_fill_latency_ms = round((time.time() - t0) * 1000)
                 return last
-            await asyncio.sleep(poll_s)
         return last
