@@ -553,9 +553,83 @@ const stateBadge = (state) => {
     HURDLE_MET_LONG: "bg-emerald-950/50 text-emerald-300 border-emerald-800 animate-pulse",
     HURDLE_MET_SHORT: "bg-rose-950/50 text-rose-300 border-rose-800 animate-pulse",
     IN_TRADE: "bg-cyan-950/50 text-cyan-300 border-cyan-800",
+    PHANTOM: "bg-fuchsia-950/50 text-fuchsia-300 border-fuchsia-800",
+    THIN: "bg-orange-950/50 text-orange-300 border-orange-800",
   };
   return `inline-flex items-center px-2 py-0.5 rounded-full border font-mono text-[10px] uppercase tracking-wider ${map[state] || map.WAITING}`;
 };
+
+const LIQ_STYLE = {
+  LIQUID: "border-emerald-800 bg-emerald-950/40 text-emerald-300",
+  THIN: "border-orange-700 bg-orange-950/40 text-orange-300",
+  PHANTOM: "border-fuchsia-800 bg-fuchsia-950/40 text-fuchsia-300",
+  NO_DEPTH: "border-slate-700 bg-slate-900/40 text-slate-400",
+};
+const fmtCompact = (v) => (v === null || v === undefined) ? "—" : v >= 1e7 ? `₹${(v / 1e7).toFixed(1)}Cr` : v >= 1e5 ? `₹${(v / 1e5).toFixed(1)}L` : v >= 1e3 ? `₹${(v / 1e3).toFixed(1)}k` : `₹${Number(v).toFixed(0)}`;
+
+function LiquidityRow({ liq, coin }) {
+  if (!liq) return <div className="col-span-2 text-slate-600">book: no depth yet</div>;
+  return (
+    <div data-testid={`spread-liquidity-${coin}`} className="col-span-2 flex items-center gap-1.5 flex-wrap" title={`walk-the-book for ₹${liq.notional_inr}: VWAP slip ${liq.slippage_pct}% · fillable within limit ${fmtCompact(liq.fillable_inr)} · frozen ${liq.frozen_s}s · dynamic hurdle ${liq.dyn_hurdle_pct}%`}>
+      <span data-testid={`spread-liq-state-${coin}`} className={`px-1.5 py-0.5 rounded border font-mono text-[9px] uppercase tracking-wider ${LIQ_STYLE[liq.state] || LIQ_STYLE.NO_DEPTH}`}>{liq.state.replace("_", " ")}</span>
+      <span>slip <span className={`${liq.slippage_pct > 0.02 ? "text-orange-300" : "text-slate-300"}`}>{Number(liq.slippage_pct).toFixed(3)}%</span></span>
+      <span>±10bp <span className="text-slate-300">{fmtCompact(liq.depth_inr)}</span></span>
+      {liq.frozen_s >= 1 && <span className="text-fuchsia-300">frozen {liq.frozen_s}s</span>}
+    </div>
+  );
+}
+
+function ComparePanel({ data, onReset }) {
+  const ex = data?.exchanges || {};
+  const cs = ex.coinswitch, dx = ex.coindcx;
+  const v = data?.verdict;
+  const g = (m, ...p) => p.reduce((a, k) => (a && a[k] !== undefined ? a[k] : null), m);
+  const rows = [
+    ["Mean |divergence| vs Binance", (m) => m.avg_abs_spread_pct != null ? `${Number(m.avg_abs_spread_pct).toFixed(4)}%` : "—", "higher = wider lag"],
+    ["Lag window (median / p75)", (m) => `${g(m, "lag_window_s", "median") ?? "—"}s / ${g(m, "lag_window_s", "p75") ?? "—"}s · n=${g(m, "lag_window_s", "n") ?? 0}`, "|spread| ≥ hurdle until it decays"],
+    ["Catch-up signal→target (median)", (m) => g(m, "catch_up_s", "median") != null ? `${g(m, "catch_up_s", "median")}s` : "—", "the exploitable window"],
+    ["Entry slippage @ slot (median / p90)", (m) => `${g(m, "slippage_pct", "median") ?? "—"}% / ${g(m, "slippage_pct", "p90") ?? "—"}%`, "walk-the-book VWAP vs top"],
+    ["Depth within ±10 bps (median)", (m) => fmtCompact(g(m, "depth_10bps_inr", "median")), "phantom-liquidity buffer"],
+    ["Slippage ladder ₹10k / ₹1L / ₹10L", (m) => ["10000", "100000", "1000000"].map((n) => { const s = g(m, "slippage_ladder", n, "median"); return s == null ? "—" : s >= 100 ? "∅" : `${Number(s).toFixed(3)}%`; }).join(" / "), "worst side, median"],
+    ["Skips phantom / thin / edge · shrunk", (m) => `${g(m, "skips", "phantom")} / ${g(m, "skips", "thin")} / ${g(m, "skips", "edge")} · ${g(m, "skips", "shrunk")}`, "of signals"],
+    ["Fee per side · exec latency", (m) => `${m.fee_pct_per_side}% · ${m.exec_latency_s}s`, "assumptions"],
+    ["Signals → trades", (m) => `${m.signals} → ${m.trades}${m.open ? ` (+${m.open} open)` : ""}`, ""],
+    ["Win rate · exits", (m) => `${m.win_rate ?? "—"}% · ${Object.entries(m.exit_reasons || {}).map(([k, n]) => `${k.split("_")[0].toLowerCase()} ${n}`).join(", ") || "—"}`, ""],
+    ["Gross · fees", (m) => `${fmtINR(m.gross_inr)} · ${fmtINR(m.fees_inr)}`, ""],
+    ["Net ₹ · per hour", (m) => `${fmtINR(m.net_inr)} · ${m.net_inr_per_hour >= 0 ? "+" : ""}${Number(m.net_inr_per_hour).toFixed(2)}/h`, "after fees + slippage"],
+    ["Feed", (m) => `${m.feed?.subscribed ? "WS" : "down"} · ${m.feed?.msgs_per_s} msg/s · ${m.feed?.wire_latency_ms ?? "—"} ms`, ""],
+  ];
+  const runtime = data?.runtime_s || 0;
+  return (
+    <section data-testid="compare-panel" className="rounded-lg border border-[#1E2638] bg-[#121721] p-5">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <h3 className="font-semibold text-slate-200 inline-flex items-center gap-2" style={{fontFamily:"Outfit, sans-serif"}}><Radio className="h-4 w-4 text-violet-400"/> Head-to-head · CoinSwitch vs CoinDCX (shadow paper, live books)</h3>
+          <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">same rules · each exchange's fee, latency and walk-the-book fills · running {Math.floor(runtime / 60)} min · primary {data?.primary || "—"}</div>
+        </div>
+        <button data-testid="compare-reset-btn" onClick={onReset} className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border border-[#1E2638] hover:border-slate-600 text-slate-300 text-xs font-bold uppercase tracking-widest transition-colors duration-150"><RefreshCw className="h-3.5 w-3.5"/> Reset stats</button>
+      </div>
+      {(!cs || !dx) ? <div data-testid="compare-warming" className="text-sm text-slate-500 font-mono">Warming up both laggard feeds…</div> : (
+        <>
+          <div className="overflow-x-auto rounded border border-[#1E2638]">
+            <table data-testid="compare-table" className="w-full text-xs font-mono">
+              <thead className="text-[10px] uppercase tracking-wider text-slate-500 border-b border-[#1E2638]"><tr><th className="text-left px-3 py-2">metric</th><th className="text-right px-3 py-2 text-emerald-300">CoinSwitch</th><th className="text-right px-3 py-2 text-cyan-300">CoinDCX</th></tr></thead>
+              <tbody>{rows.map(([label, fn, hint]) => (
+                <tr key={label} className="border-b border-[#1E2638]/60"><td className="px-3 py-1.5 text-slate-300">{label}{hint && <span className="text-slate-600 ml-1">· {hint}</span>}</td><td className="px-3 py-1.5 text-right text-slate-100">{fn(cs)}</td><td className="px-3 py-1.5 text-right text-slate-100">{fn(dx)}</td></tr>
+              ))}</tbody>
+            </table>
+          </div>
+          {v && (
+            <div data-testid="compare-verdict" className={`mt-3 rounded border p-3 text-xs font-mono space-y-1 ${v.winner === "coinswitch" ? "border-emerald-800 bg-emerald-950/20" : v.winner === "coindcx" ? "border-cyan-800 bg-cyan-950/20" : "border-[#1E2638]"}`}>
+              <div className="text-[10px] uppercase tracking-widest text-slate-500">verdict · confidence {v.confidence}</div>
+              {v.lines.map((l, i) => <div key={i} className={l.startsWith("→") ? "text-slate-100 font-bold" : "text-slate-300"}>{l}</div>)}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
 
 function Dashboard() {
   const [status, setStatus] = useState(null);
@@ -570,10 +644,12 @@ function Dashboard() {
   const cfgDraftInit = useRef(false);
   const [liveCheck, setLiveCheck] = useState(null);
   const [telemetry, setTelemetry] = useState(null);
+  const [compare, setCompare] = useState(null);
+  const resetCompare = async () => { try { const r = await axios.post(`${API}/compare/reset`); setCompare(r.data); } catch (e) { console.error(e); } };
 
   const pull = async () => {
     try {
-      const [s, sp, op, cl, lg, eq, cfg, tm] = await Promise.all([
+      const [s, sp, op, cl, lg, eq, cfg, tm, cmp] = await Promise.all([
         axios.get(`${API}/status`),
         axios.get(`${API}/spreads`),
         axios.get(`${API}/positions/open`),
@@ -582,6 +658,7 @@ function Dashboard() {
         axios.get(`${API}/equity-curve`),
         axios.get(`${API}/config`),
         axios.get(`${API}/telemetry`),
+        axios.get(`${API}/compare`),
       ]);
       setStatus(s.data);
       setSpreads(sp.data.items || []);
@@ -591,6 +668,7 @@ function Dashboard() {
       setEquity(eq.data.items || []);
       setConfig(cfg.data);
       setTelemetry(tm.data);
+      setCompare(cmp.data);
       if (!cfgDraftInit.current) { cfgDraftInit.current = true; setCfgDraft(cfg.data); }
     } catch (e) { console.error(e); }
   };
@@ -625,6 +703,9 @@ function Dashboard() {
       timeout_seconds: Number(cfgDraft.timeout_seconds),
       stop_loss_pct: Number(cfgDraft.stop_loss_pct),
       basis_filter: !!cfgDraft.basis_filter,
+      max_slippage_pct: Number(cfgDraft.max_slippage_pct),
+      phantom_frozen_s: Number(cfgDraft.phantom_frozen_s),
+      min_order_inr: Number(cfgDraft.min_order_inr),
     });
     setSaving(false);
     pull();
@@ -845,6 +926,7 @@ function Dashboard() {
                     <div>BIN ask <span className="text-slate-300">{fmtNum(sp.binance_ask, 4)}</span></div>
                     <div>CSW bid <span className="text-slate-300">{fmtNum(sp.coinswitch_bid, 4)}</span></div>
                     <div className="col-span-2">peak 60s <span data-testid={`spread-peak-ratio-${sp.coin}`} className="text-slate-300">{Math.round((sp.peak_ratio_60s || 0) * 100)}%</span> of hurdle · basis <span data-testid={`spread-basis-${sp.coin}`} className="text-purple-300">{(sp.basis_pct ?? 0).toFixed(3)}%</span></div>
+                    <LiquidityRow liq={sp.liquidity} coin={sp.coin} />
                   </div>
                 </div>
               );
@@ -981,6 +1063,9 @@ function Dashboard() {
                   ["hurdle_extra_pct", "Extra Hurdle %", "config-hurdle-gate-input"],
                   ["timeout_seconds", "Timeout (s)", "config-timeout-window-input"],
                   ["stop_loss_pct", "Stop Loss %"],
+                  ["max_slippage_pct", "Max RT Slippage %", "config-max-slippage-input"],
+                  ["phantom_frozen_s", "Phantom after (s)", "config-phantom-frozen-input"],
+                  ["min_order_inr", "Shrink floor ₹", "config-min-order-input"],
                 ].map(([k, label, tid]) => (
                   <label key={k} className="block">
                     <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">{label}</span>
@@ -1057,6 +1142,7 @@ function Dashboard() {
 
         <ReplayPanel sessions={sessions} recorder={recorder} config={config} status={status} onRun={runReplay} result={replay} running={replayRunning} />
 
+        <ComparePanel data={compare} onReset={resetCompare} />
         <SweepPanel sessions={sessions} onRun={runSweep} result={sweep} running={sweepRunning} />
 
         <ScreenerPanel result={screenRes} onRun={runScreener} onApply={applyUniverseCoins} running={screening} applyResult={applyUniverse} openCount={open.length} />

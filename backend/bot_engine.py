@@ -31,12 +31,13 @@ import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
 
 from coinswitch_client import CoinSwitchError, CoinSwitchFuturesClient
 from coindcx_client import CoinDCXError, CoinDCXFuturesClient, CoinDCXUserStream
+from liquidity import assess
 from replay import TickRecorder
 from settings_store import apply_settings, load_settings, save_settings
 
@@ -92,6 +93,16 @@ class BotConfig:
     data_dir: str = ""                     # settings.json + ticks/ (default: <repo>/data)
     record_ticks: bool = True
     tick_retention_days: int = 7
+    # phantom-liquidity guard
+    max_slippage_pct: float = 0.05         # max round-trip slippage (entry+exit) we accept
+    phantom_frozen_s: float = 3.0          # laggard book unchanged this long while Binance ticks → PHANTOM
+    depth_bps: float = 10.0                # resting-depth window reported per coin
+    min_order_inr: float = 100.0           # shrink floor: skip if the book can't absorb at least this
+    # shadow comparison assumptions (per laggard exchange)
+    coinswitch_taker_fee_pct: float = 0.05
+    coindcx_taker_fee_pct: float = 0.059
+    coinswitch_exec_latency_s: float = 1.0
+    coindcx_exec_latency_s: float = 1.9    # measured: create ≈1.2 s + fill confirm ≈0.7 s
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -132,6 +143,14 @@ class BotConfig:
             data_dir=os.environ.get("DATA_DIR", ""),
             record_ticks=_b("RECORD_TICKS", True),
             tick_retention_days=_i("TICK_RETENTION_DAYS", 7),
+            max_slippage_pct=_f("MAX_SLIPPAGE_PCT", 0.05),
+            phantom_frozen_s=_f("PHANTOM_FROZEN_S", 3.0),
+            depth_bps=_f("DEPTH_BPS", 10.0),
+            min_order_inr=_f("MIN_ORDER_INR", 100.0),
+            coinswitch_taker_fee_pct=_f("COINSWITCH_TAKER_FEE_PCT", 0.05),
+            coindcx_taker_fee_pct=_f("COINDCX_TAKER_FEE_PCT", 0.059),
+            coinswitch_exec_latency_s=_f("COINSWITCH_EXEC_LATENCY_S", 1.0),
+            coindcx_exec_latency_s=_f("COINDCX_EXEC_LATENCY_S", 1.9),
         )
 
 
@@ -177,6 +196,9 @@ class Position:
     leverage: int = 1
     notional_inr: float = 0.0
     basis_pct: float = 0.0
+    liq_state: str = ""
+    liq_slippage_pct: float = 0.0      # expected one-side entry slippage at the traded notional
+    requested_notional_inr: float = 0.0  # pre-shrink slot notional
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +432,9 @@ class LiveCoinSwitchBookFeed:
         self._fx = fx_provider
         self.url = url or COINSWITCH_WS_DEFAULT_URL
         self.book: Dict[str, TopOfBook] = {}
+        self.depth: Dict[str, Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]] = {}  # coin -> (bids, asks) top-20 in USDT
+        self.book_change_ts: Dict[str, float] = {}   # coin -> last time the top-5 levels changed
+        self._book_sig: Dict[str, tuple] = {}
         self.tick_recv_ts: Dict[str, float] = {}      # coin -> local epoch s of last snapshot
         self.connected = False
         self.subscribed = False
@@ -474,9 +499,32 @@ class LiveCoinSwitchBookFeed:
         ts_ms = int(d.get("timestamp") or now * 1000)
         self.book[coin] = TopOfBook(coin=coin, bid=bid * fx, ask=ask * fx, ts_ms=ts_ms)
         self.tick_recv_ts[coin] = now
+        self._store_depth(coin, bids, asks, now)
         lat = max(0.0, now * 1000.0 - ts_ms)
         if lat < 60_000:  # ignore absurd clock-skew values
             self.wire_latency_ms = lat if self.wire_latency_ms is None else 0.9 * self.wire_latency_ms + 0.1 * lat
+
+    def _store_depth(self, coin: str, bids: list, asks: list, now: float) -> None:
+        def _lv(rows):
+            out = []
+            for r in rows[:20]:
+                try:
+                    p, q = float(r[0]), float(r[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if p > 0 and q > 0: out.append((p, q))
+            return out
+        b, a = _lv(bids), _lv(asks)
+        self.depth[coin] = (b, a)
+        sig = (tuple(b[:5]), tuple(a[:5]))
+        if sig != self._book_sig.get(coin):
+            self._book_sig[coin] = sig
+            self.book_change_ts[coin] = now
+        self.book_change_ts.setdefault(coin, now)
+
+    def frozen_s(self, coin: str) -> float:
+        t = self.book_change_ts.get(coin)
+        return (time.time() - t) if t else 0.0
 
     async def _run(self) -> None:
         backoff = 1
@@ -582,8 +630,10 @@ class LiveCoinDCXBookFeed(LiveCoinSwitchBookFeed):
                                 b = self._books[coin]
                                 if not b["bids"] or not b["asks"]: continue
                                 self.msg_count += 1; self._rate_window.append(self.last_msg_ts)
+                                bids = sorted(b["bids"].items(), key=lambda x: -x[0])[:20]
+                                asks = sorted(b["asks"].items(), key=lambda x: x[0])[:20]
                                 self._on_snapshot({"s": f"{coin}USDT", "timestamp": d.get("ts"),
-                                                   "bids": [[max(b["bids"]), 0]], "asks": [[min(b["asks"]), 0]]})
+                                                   "bids": bids, "asks": asks})
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -593,6 +643,11 @@ class LiveCoinDCXBookFeed(LiveCoinSwitchBookFeed):
             finally:
                 self.connected = False; self.subscribed = False
                 if self._running: self.reconnects += 1
+
+
+def make_laggard_feed(exchange: str, coins: List[str], fx_provider, url: str = "") -> LiveCoinSwitchBookFeed:
+    if exchange == "coindcx": return LiveCoinDCXBookFeed(coins, fx_provider)
+    return LiveCoinSwitchBookFeed(coins, fx_provider, url=url)
 
 
 class FXRateService:
@@ -855,6 +910,8 @@ class BotEngine:
         # heatmap: coin -> {epoch_sec: signed max-|spread|% in that second} (kept HEAT_RETENTION_S)
         self._heat: Dict[str, Dict[int, float]] = {c: {} for c in cfg.coins}
         self.paused: set = set()
+        self._last_liq: Dict[str, Dict[str, Any]] = {}
+        self.liq_stats: Dict[str, int] = {"phantom_skips": 0, "thin_skips": 0, "edge_skips": 0, "shrunk": 0}
         self._live_missing_keys_warned = False
         self._stale_no_keys_warned = False
         self._restored_settings = apply_settings(self, load_settings(self.settings_path))
@@ -875,9 +932,8 @@ class BotEngine:
         self.simulator = MarketSimulator(cfg.coins, fx_provider=lambda: self.fx.rate, fx_ref=cfg.fx_usdt_inr) if cfg.simulate else None
         self.live_feed = None if cfg.simulate else LiveBinanceFeed(cfg.coins)
         # Public laggard book WS — no keys needed, powers PAPER + LIVE when not simulating
-        FeedCls = LiveCoinDCXBookFeed if cfg.laggard_exchange == "coindcx" else LiveCoinSwitchBookFeed
         self.coinswitch_feed: Optional[LiveCoinSwitchBookFeed] = None if cfg.simulate else \
-            FeedCls(cfg.coins, lambda: self.fx.rate, url=cfg.coinswitch_ws_url if cfg.laggard_exchange == "coinswitch" else "")
+            make_laggard_feed(cfg.laggard_exchange, cfg.coins, lambda: self.fx.rate, url=cfg.coinswitch_ws_url)
 
     def _reset_universe(self, coins: List[str]) -> None:
         self.cfg.coins = coins
@@ -887,6 +943,7 @@ class BotEngine:
         self._sparkline = {c: [] for c in coins}
         self._heat = {c: {} for c in coins}
         self._basis_samples = {c: [] for c in coins}
+        self._last_liq = {}
         self.paused = {c for c in self.paused if c in coins}
         self._build_feeds()
         if self.coinswitch_poller: self.coinswitch_poller.coins = coins
@@ -1017,6 +1074,8 @@ class BotEngine:
                 "rate_limiter": self.coinswitch.limiter_stats() if self.coinswitch else None,
             },
             "fx": self.fx.status(),
+            "liquidity_guard": {**self.liq_stats, "max_slippage_pct": self.cfg.max_slippage_pct,
+                                "phantom_frozen_s": self.cfg.phantom_frozen_s, "min_order_inr": self.cfg.min_order_inr},
             "user_ws": None if not self.coindcx_user_stream else {
                 **self.coindcx_user_stream.status(),
                 "active": self.cfg.laggard_exchange == "coindcx",
@@ -1030,6 +1089,28 @@ class BotEngine:
     def hurdle_pct(self) -> float:
         c = self.cfg
         return c.entry_taker_fee_pct + c.exit_taker_fee_pct + c.slippage_buffer_pct + c.hurdle_extra_pct
+
+    def dynamic_hurdle_pct(self, one_side_slippage_pct: float) -> float:
+        """Hurdle with the flat slippage buffer replaced by measured round-trip slippage (floored at the buffer)."""
+        c = self.cfg
+        return c.entry_taker_fee_pct + c.exit_taker_fee_pct + max(c.slippage_buffer_pct, 2 * one_side_slippage_pct) + c.hurdle_extra_pct
+
+    # --- phantom-liquidity guard ---------------------------------------------------
+    def liquidity(self, coin: str, direction: str, notional_inr: float) -> Optional[Dict[str, Any]]:
+        """Walk the laggard book for `notional_inr` on the side we'd hit (LONG→asks, SHORT→bids)."""
+        feed = self.coinswitch_feed
+        if not feed or coin not in feed.depth: return None
+        bids, asks = feed.depth[coin]
+        levels = asks if direction == "LONG" else bids
+        fx = max(self.fx.rate, 1e-6)
+        leader = self._leader(coin)
+        leader_fresh = bool(leader) and (time.time() * 1000 - leader.ts_ms) < 2000
+        liq = assess(levels, notional_inr / fx, self.cfg.max_slippage_pct / 2, self.cfg.depth_bps,
+                     feed.frozen_s(coin), self.cfg.phantom_frozen_s if leader_fresh else float("inf"))
+        return {"state": liq.state, "vwap_inr": liq.vwap * fx, "slippage_pct": liq.slippage_pct,
+                "fillable_inr": round(liq.fillable * fx, 2), "depth_inr": round(liq.depth_notional * fx, 2),
+                "levels": liq.levels, "frozen_s": liq.frozen_s, "notional_inr": round(notional_inr, 2),
+                "dyn_hurdle_pct": round(self.dynamic_hurdle_pct(liq.slippage_pct), 4)}
 
     def allocated_per_slot_inr(self) -> float:
         n = max(1, self.cfg.num_slots)
@@ -1111,6 +1192,9 @@ class BotEngine:
         sp = self._sparkline[coin]; sp.append(adj_pct)
         if len(sp) > 60: self._sparkline[coin] = sp[-60:]
         self._record_heat(coin, adj_pct)
+        lev = max(1, int(self.cfg.leverage))
+        liq = self.liquidity(coin, "LONG" if adj_pct >= 0 else "SHORT", self.allocated_per_slot_inr() * lev)
+        if liq: self._last_liq[coin] = liq
 
         # skip if slot already occupied
         if await self.store.get_open(coin):
@@ -1125,10 +1209,10 @@ class BotEngine:
         target_ref = leader_inr_mid / (1 + basis / 100.0) if self.cfg.basis_filter else leader_inr_mid
         if adj_pct > hurdle:
             self._last_signal_state[coin] = "HURDLE_MET_LONG"
-            await self._open_position(coin, "LONG", leader, lagg, target_ref, basis)
+            await self._open_position(coin, "LONG", leader, lagg, target_ref, basis, adj_pct)
         elif -adj_pct > hurdle:
             self._last_signal_state[coin] = "HURDLE_MET_SHORT"
-            await self._open_position(coin, "SHORT", leader, lagg, target_ref, basis)
+            await self._open_position(coin, "SHORT", leader, lagg, target_ref, basis, adj_pct)
         else:
             self._last_signal_state[coin] = "WAITING"
 
@@ -1201,14 +1285,38 @@ class BotEngine:
     # --- order lifecycle -----------------------------------------------------
     async def _open_position(self, coin: str, direction: str,
                              leader: TopOfBook, lagg: TopOfBook,
-                             leader_inr_mid: float, basis: float = 0.0) -> None:
+                             leader_inr_mid: float, basis: float = 0.0, adj_pct: Optional[float] = None) -> None:
         signal_ts = time.time()
         size_inr = min(self.allocated_per_slot_inr(), max(0.0, self.equity_inr - sum(p.size_inr for p in await self.store.all_open())))
         if size_inr < 50: return  # min lot guard
         lev = max(1, int(self.cfg.leverage))
         notional_inr = size_inr * lev
+        requested_notional = notional_inr
         # Entry price (paper) = worst top-of-book (taker)
         entry_price = lagg.ask if direction == "LONG" else lagg.bid
+        # -------- phantom-liquidity guard: walk the book before committing --------
+        liq = self.liquidity(coin, direction, notional_inr)
+        liq_state, liq_slip = "", 0.0
+        if liq:
+            if liq["state"] in ("PHANTOM", "NO_DEPTH"):
+                self.liq_stats["phantom_skips"] += 1
+                self._last_signal_state[coin] = "PHANTOM"
+                return
+            if liq["fillable_inr"] < notional_inr:
+                if liq["fillable_inr"] < self.cfg.min_order_inr:
+                    self.liq_stats["thin_skips"] += 1
+                    self._last_signal_state[coin] = "THIN"
+                    return
+                notional_inr = liq["fillable_inr"]
+                size_inr = notional_inr / lev
+                self.liq_stats["shrunk"] += 1
+                liq = self.liquidity(coin, direction, notional_inr) or liq
+            liq_state, liq_slip = liq["state"], liq["slippage_pct"]
+            if adj_pct is not None and abs(adj_pct) < self.dynamic_hurdle_pct(liq_slip):
+                self.liq_stats["edge_skips"] += 1
+                self._last_signal_state[coin] = "THIN"
+                return
+            if liq["vwap_inr"] > 0: entry_price = liq["vwap_inr"]
         contracts = notional_inr / entry_price
         target = leader_inr_mid
         stop = entry_price * (1 - self.cfg.stop_loss_pct/100.0) if direction == "LONG" \
@@ -1284,9 +1392,13 @@ class BotEngine:
             leverage=lev,
             notional_inr=notional_inr,
             basis_pct=basis,
+            liq_state=liq_state,
+            liq_slippage_pct=liq_slip,
+            requested_notional_inr=requested_notional,
         )
         await self.store.add_open(pos)
-        await self.store.log("TRADE", f"OPEN {direction} {coin} ₹{size_inr:.2f}×{lev} @ {entry_price:.6f}")
+        shrink = f" (shrunk from ₹{requested_notional:.0f})" if notional_inr < requested_notional - 0.5 else ""
+        await self.store.log("TRADE", f"OPEN {direction} {coin} ₹{size_inr:.2f}×{lev} @ {entry_price:.6f}{shrink} · book {liq_state or 'n/a'} slip {liq_slip:.3f}%")
         await self.telegram.send(
             f"🟢 <b>OPEN {direction}</b> {coin}\n"
             f"Margin: ₹{size_inr:.2f} × {lev}x = ₹{notional_inr:.2f} ({contracts:.6f} contracts)\n"
@@ -1350,6 +1462,10 @@ class BotEngine:
     async def _close_position(self, pos: Position, price: float, reason: str) -> None:
         exit_fee_inr: Optional[float] = None
         exit_order_id: Optional[str] = None
+        if pos.mode == "PAPER":
+            # realistic paper exit: walk the opposite side of the book for our contracts
+            liq = self.liquidity(pos.coin, "SHORT" if pos.direction == "LONG" else "LONG", pos.contracts * price)
+            if liq and liq["vwap_inr"] > 0: price = liq["vwap_inr"]
         if pos.mode == "LIVE" and self._live_executor_ready():
             if self._order_cooldown.get(pos.coin, 0) > time.time(): return
             # place reduce_only MARKET on opposite side
@@ -1539,5 +1655,6 @@ class BotEngine:
                 "heat": heat,
                 "near_hurdle_hits_60s": sum(1 for r in heat if abs(r) >= self.NEAR_HURDLE_RATIO),
                 "peak_ratio_60s": round(max((abs(r) for r in heat), default=0.0), 3),
+                "liquidity": self._last_liq.get(c),
             })
         return out

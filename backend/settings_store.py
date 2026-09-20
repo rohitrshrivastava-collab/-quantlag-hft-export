@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 CFG_KEYS = ("num_slots", "leverage", "starting_capital_inr", "paper_trading", "basis_filter", "basis_window_s",
             "entry_taker_fee_pct", "exit_taker_fee_pct", "slippage_buffer_pct", "hurdle_extra_pct",
-            "timeout_seconds", "stop_loss_pct", "coins")
+            "timeout_seconds", "stop_loss_pct", "coins", "max_slippage_pct", "phantom_frozen_s", "min_order_inr")
 STATE_KEYS = ("equity_inr", "realized_pnl_inr", "trade_count", "win_count", "loss_count",
               "total_hold_sec", "total_exec_latency_ms")
 

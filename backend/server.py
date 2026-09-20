@@ -30,6 +30,7 @@ from bot_engine import BotConfig, BotEngine
 from coindcx_client import CoinDCXError
 from replay import replay_session, replay_sweep
 from screener import screen
+from shadow import ShadowRunner
 from verdict import evaluate as evaluate_verdict
 
 ROOT_DIR = Path(__file__).parent
@@ -51,12 +52,14 @@ db = mongo_client[os.environ["DB_NAME"]]
 # --- Bot singleton -----------------------------------------------------------
 CFG = BotConfig.from_env()
 ENGINE = BotEngine(CFG)
+SHADOW = ShadowRunner(ENGINE)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Auto-start bot in paper mode on server boot (dashboard shows live data)
     await ENGINE.start()
+    await SHADOW.start()
     try:
         yield
     finally:
@@ -82,6 +85,9 @@ class ConfigUpdate(BaseModel):
     stop_loss_pct: Optional[float] = None
     basis_filter: Optional[bool] = None
     basis_window_s: Optional[int] = Field(default=None, ge=30, le=3600)
+    max_slippage_pct: Optional[float] = Field(default=None, ge=0, le=2)
+    phantom_frozen_s: Optional[float] = Field(default=None, ge=0.5, le=60)
+    min_order_inr: Optional[float] = Field(default=None, ge=1, le=1e6)
 
 
 class AccountUpdate(BaseModel):
@@ -149,6 +155,10 @@ async def get_config():
         "laggard_exchange": c.laggard_exchange,
         "coindcx_client_ready": ENGINE.coindcx is not None,
         "digest_time_ist": c.digest_time_ist,
+        "max_slippage_pct": c.max_slippage_pct,
+        "phantom_frozen_s": c.phantom_frozen_s,
+        "min_order_inr": c.min_order_inr,
+        "depth_bps": c.depth_bps,
     }
 
 
@@ -427,6 +437,35 @@ async def update_config(body: ConfigUpdate):
 @api.get("/spreads")
 async def spreads():
     return {"items": ENGINE.spreads_snapshot(), "hurdle_pct": ENGINE.hurdle_pct()}
+
+
+@api.get("/compare")
+async def compare():
+    """Head-to-head shadow simulation: CoinSwitch vs CoinDCX on identical rules, live books, own fees/latency."""
+    return SHADOW.report()
+
+
+@api.post("/compare/reset")
+async def compare_reset():
+    SHADOW.reset()
+    await ENGINE.store.log("INFO", "Shadow comparison stats reset")
+    return SHADOW.report()
+
+
+@api.get("/liquidity/{coin}")
+async def liquidity(coin: str, notional_inr: Optional[float] = None, direction: str = "LONG"):
+    coin = coin.upper()
+    if coin not in ENGINE.cfg.coins:
+        raise HTTPException(status_code=404, detail="coin not in universe")
+    notional = notional_inr or ENGINE.allocated_per_slot_inr() * max(1, ENGINE.cfg.leverage)
+    liq = ENGINE.liquidity(coin, direction.upper(), notional)
+    if liq is None:
+        raise HTTPException(status_code=503, detail="no order-book depth yet for this coin")
+    feed = ENGINE.coinswitch_feed
+    bids, asks = feed.depth.get(coin, ([], []))
+    fx = ENGINE.fx.rate
+    return {"coin": coin, "direction": direction.upper(), **liq,
+            "book_inr": {"bids": [[round(p * fx, 6), q] for p, q in bids[:10]], "asks": [[round(p * fx, 6), q] for p, q in asks[:10]]}}
 
 
 @api.get("/positions/open")
