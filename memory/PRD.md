@@ -164,6 +164,16 @@ SQLite persistence, paper/live toggle.
   restored on startup. CoinDCX keys still 401 (user to fix on exchange side).
 - Testing: `iteration_8.json` backend 16/16, frontend pass.
 
+### Iteration 9 (2026-06, "CoinDCX test-order flow")
+- `POST /api/coindcx/test-order {coin, notional_usdt, confirm}`: wallet →
+  instrument sizing (public instrument endpoint: min_notional, quantity_increment)
+  → leverage 1 → market BUY → market SELL close → verify flat; returns step
+  list; 400 without confirm; 424 with {message, steps} on API error. Telegram +
+  TRADE log on success. Dashboard sub-panel gated on a passing CoinDCX check
+  AND a confirm checkbox. Keys still rejected by CoinDCX (401) — egress IP of
+  preview pod: 35.225.230.28 (will differ on EC2).
+- Testing: `iteration_9.json` backend 7/7, frontend pass (safety gate verified).
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 

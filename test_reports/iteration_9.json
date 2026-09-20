@@ -1,0 +1,28 @@
+{
+  "summary": "Iteration 9: Focused verification of CoinDCX check + test-order endpoints and dashboard safety gate. Backend: 7/7 pytest cases passed. Frontend: all coindcx-* data-testids present, initial state matches spec (DOGE/6/unchecked/btn disabled), Check CoinDCX renders exact '✗ CoinDCX API 401: ... (401 = key/secret rejected...)' message, and the test-order button remains DISABLED even after ticking confirm because the preflight check failed — this is the intended safety gate. Bot stays in PAPER mode; no order placed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "config panel dropdown", "issues": ["React hydration warning: <span> inside <option> (non-blocking, minor)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter9_coindcx.py",
+    "/app/test_reports/pytest/iter9.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py sends Telegram message in the success path of coindcx_test_order — review request said 'Do NOT send Telegram messages'. Currently unreachable because keys are 401, but if keys are ever fixed this will fire; consider gating behind a flag or removing.",
+    "coindcx_test_order references local `qty` in success-path summary after exception paths — safe today, but if exceptions occur before sizing step the variable would be unbound (guarded by early raise, still worth a defensive check)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_backend_iter9_coindcx.py"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "none",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "CoinDCX keys still return 401 from exchange (expected). Preflight returns 424 with 'CoinDCX API 401' + hint; test-order confirm=false -> 400, confirm=true -> 424 with detail={message, steps:[..., {step:'error',ok:false}]}. Validation via Pydantic Field(ge=1,le=50). Log line 'CoinDCX test order failed' present in /api/logs. Frontend safety gate: place-order button stays disabled until BOTH preflight ok AND confirm ticked; since preflight cannot pass with current keys, no way to fire the order from UI."
+}
