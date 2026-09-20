@@ -27,6 +27,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -1467,6 +1468,7 @@ class BotEngine:
                     "WARN", f"[LIVE] {coin} order {status} exec_qty=0 order_id={entry_order_id}")
                 return
             # translate to engine's INR bookkeeping using current FX
+            lev = int(fill.get("leverage") or lev)       # exchange may cap leverage for the size
             contracts = exec_qty                          # base-asset units
             entry_price = avg_px * fx                     # INR-equivalent entry
             notional_inr = exec_qty * avg_px * fx         # actual filled INR notional
@@ -1529,13 +1531,23 @@ class BotEngine:
             if not reduce_only and price_usdt > 0 and sized * price_usdt > qty * price_usdt * 1.5 + 1e-9:
                 raise SlotTooSmall(f"{coin} exchange minimum ≈ {sized * price_usdt:.2f} USDT exceeds slot notional {qty * price_usdt:.2f} USDT")
             qty = sized
-            placed = await self.coindcx.market_order(coin, side, qty, self.cfg.leverage)
+            lev = int(self.cfg.leverage)
+            try:
+                placed = await self.coindcx.market_order(coin, side, qty, lev)
+            except CoinDCXError as e:
+                m = re.search(r"[Mm]ax allowed leverage[^0-9]*([0-9]+(?:\.[0-9]+)?)", str(e.body))
+                if not m or e.status != 400: raise
+                lev = max(1, int(float(m.group(1))))
+                await self.store.log("WARN", f"[LIVE] {coin} capped by exchange to {lev}x for this size — retrying")
+                try: await self.coindcx.update_leverage(coin, lev)
+                except CoinDCXError: pass
+                placed = await self.coindcx.market_order(coin, side, qty, lev)
             oid = str(placed.get("id") or "")
             if not oid: raise RuntimeError(f"CoinDCX create missing id: {placed}")
             o = await self.coindcx.wait_for_fill(oid, side, timeout_s=self.cfg.live_order_timeout_s) or placed
             total = float(o.get("total_quantity") or 0); rem = float(o.get("remaining_quantity") or 0)
             return {"order_id": oid, "exec_qty": max(0.0, total - rem), "avg_px": float(o.get("avg_price") or 0),
-                    "fee": float(o.get("fee_amount") or 0), "status": str(o.get("status", "")),
+                    "fee": float(o.get("fee_amount") or 0), "status": str(o.get("status", "")), "leverage": lev,
                     "fill_source": self.coindcx.last_fill_source, "fill_latency_ms": self.coindcx.last_fill_latency_ms,
                     "create_ms": self.coindcx.last_create_ms}
         placed = await self.coinswitch.place_order(symbol=f"{coin}USDT", side=side, order_type="MARKET",

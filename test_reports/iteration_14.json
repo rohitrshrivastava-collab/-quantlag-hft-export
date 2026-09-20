@@ -1,0 +1,29 @@
+{
+  "summary": "Iter14 - spike-persistence filter, latency split, CoinDCX user-WS idle-timeout. Backend pytest 6/6 passed against REACT_APP_BACKEND_URL. /api/status: spike_filter={crossings:int, persisted:int, reverted:int, persist_ms:300, arming:[]}, avg_create_ms=None, avg_fill_confirm_ms=None, live_fill_samples=0, last_create_ms=None, last_fill_confirm_ms=None. /api/config: spike_persist_ms=300, scan_interval_s=0.1. PUT {spike_persist_ms:500}->200 GET==500; PUT {300}->200 GET==300; PUT {20000}->422. /api/spreads items all in allowed signal_state set (observed WAITING). /api/telemetry feed.user_ws.joined=true; reconnects stayed constant over 40s idle window (idle-timeout no-reconnect confirmed). /api/compare exchanges.*.skips contains 'stale' key on both binance & coindcx. /api/positions/closed?limit=3 items include keys create_ms and fill_confirm_ms (null for legacy rows). Frontend 1920px: portfolio-execution-latency-card renders 'EXEC LATENCY (AVG) 0 ms' with child data-testid=latency-split text 'last create 290 ms  fill  ms  hurdle 0.300%' (contains 'create'); config-spike-persist-input value=300 present. Frontend 390px: scrollWidth==clientWidth==390 (no horizontal overflow). No writes to restricted endpoints; bot left LIVE on CoinDCX.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Dashboard (dev warning)", "issues": ["React hydration warning: <span> cannot be a child of <option> in benchmark-duration <select> at App.js:434. Pre-existing from emergent editor annotations; harmless in preview but should not appear in production builds."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter14.py",
+    "/app/test_reports/pytest/iter14.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "spike_filter.crossings=1 / persisted=0 / reverted=1 observed on a quiet market - filter is doing its job by rejecting a non-persistent spike; consider adding a rolling window (e.g. last 60s) so the counters do not grow unbounded for long-running sessions.",
+    "Latency-split UI renders 'fill  ms' (empty dash) when fill_confirm_ms is null. Consider a stable placeholder (e.g. '' or 'n/a') to avoid the visually-empty gap between 'fill' and 'ms'.",
+    "/api/positions/closed and /api/spreads both return an envelope {items:[...]} while some sibling endpoints return raw arrays - inconsistent response shape across list endpoints; document or normalise."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter14.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a - no auth. CoinDCX keys are REAL MONEY LIVE.",
+  "seed_data_creation": "none - only the required spike_persist_ms 300->500->300 round-trip on /api/config.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Bot LIVE on CoinDCX at end of run. /api/spreads and /api/positions/closed return {items:[...]} envelope (not raw array) - use data.get('items'). /api/config accepts PUT of individual fields; spike_persist_ms bounds validated at pydantic layer (20000 -> 422). CoinDCX user_ws.reconnects stays flat across 40s idle now (previously would tick up). live_fill_samples was 0 during the run so avg_create_ms/avg_fill_confirm_ms were both null - re-run when fills exist to exercise numeric branch. Do NOT write to /api/bot/mode, /api/bot/stop, /api/account, /api/laggard, /api/coins/*, /api/universe, /api/compare/reset, /api/coindcx/test-order, /api/telegram/*.",
+  "rca of the issue": "n/a - all tests pass"
+}

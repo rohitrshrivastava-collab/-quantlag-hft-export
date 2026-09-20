@@ -260,6 +260,18 @@ SQLite persistence, paper/live toggle.
   net −₹7.33 at 10x; slot shrunk ₹1764→₹1492 by the liquidity guard.
 - Testing: self-tested (curl + screenshot); CoinSwitch wallet via engine script.
 
+### Iteration 15 (2026-06, "Spike-persistence filter · latency split · WS idle fix · leverage-cap retry")
+- Scan loop 0.1 s (`scan_interval_s`); recorder/sparkline throttled to 0.4 s. Spike filter:
+  a hurdle crossing must persist `spike_persist_ms` (300, PUT /api/config, dashboard input)
+  → states `ARMING_LONG/SHORT`; `status.spike_filter {crossings, persisted, reverted,
+  arming}` (first 10 min live: 8 crossings, 6 reverted, 2 fired). Shadow sim mirrors it.
+- `Position.create_ms / fill_confirm_ms`; `status.avg_create_ms / avg_fill_confirm_ms /
+  live_fill_samples / last_*`; Exec Latency card sub-line `latency-split`.
+- CoinDCX user WS: idle `receive` timeout is now a no-op (was reconnecting every 30 s).
+- CoinDCX "Max allowed leverage for current position size = 7.0x" (ONE) → parse, push that
+  leverage for the pair, retry once; effective leverage used for margin bookkeeping.
+- Testing: `iteration_14.json` backend 6/6, frontend pass (read-only; bot LIVE).
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 
