@@ -272,6 +272,23 @@ SQLite persistence, paper/live toggle.
   leverage for the pair, retry once; effective leverage used for margin bookkeeping.
 - Testing: `iteration_14.json` backend 6/6, frontend pass (read-only; bot LIVE).
 
+### Iteration 16 (2026-06, "CoinSwitch trial prep — waiting for futures-wallet USDT")
+- User funded CoinSwitch with ₹500 → it sits in the SPOT/INR wallet (`/user/portfolio`:
+  INR 500.11); futures wallet (USDT-margined only) still 0.0055 USDT. No public API to move
+  spot→futures (only the HFT/DMA product has `/dma/api/v1/funds/transfer`), so the user must
+  buy USDT and "Transfer to Futures" in the app.
+- `coinswitch_trial_watcher` (server.py, every 20 s): when laggard=coinswitch, LIVE and
+  futures USDT ≥ 4 with no open positions → equity = usdt×fx×0.98, 1 slot, 10x, Telegram +
+  log "CoinSwitch trial armed". `GET /api/coinswitch/trial`; dashboard banner
+  `coinswitch-trial-banner` with the app steps.
+- CoinSwitch client: warm keep-alive session (`keep_warm` via ticker, ≈330–350 ms RTT),
+  `last_create_ms`/`last_fill_latency_ms`, `spec()`/`size_qty()` from instrument_info
+  (DOGE min 87, SOL 0.1, XRP 5.4; taker 0.065%/side, max lev 57–86). `_live_market`
+  CoinSwitch branch sizes + SlotTooSmall guard + returns create/fill timings.
+- `feed.exec` telemetry (exchange-agnostic) + `CS ORDERS` chip; shadow CoinSwitch fee → 0.065%.
+- User currently LIVE on pair CoinSwitch (4 slots, 10x, equity ₹1675) — orders will be
+  rejected for margin until funded; harmless.
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 

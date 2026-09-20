@@ -103,7 +103,7 @@ class BotConfig:
     spike_persist_ms: int = 300            # Binance dislocation must stay above the hurdle this long before we fire
     scan_interval_s: float = 0.1
     # shadow comparison assumptions (per laggard exchange)
-    coinswitch_taker_fee_pct: float = 0.05
+    coinswitch_taker_fee_pct: float = 0.065   # from instrument_info taker_fee_rate 0.00065
     coindcx_taker_fee_pct: float = 0.059
     coinswitch_exec_latency_s: float = 1.0
     coindcx_exec_latency_s: float = 1.9    # measured: create ≈1.2 s + fill confirm ≈0.7 s
@@ -154,7 +154,7 @@ class BotConfig:
             max_entry_frozen_s=_f("MAX_ENTRY_FROZEN_S", 1.0),
             spike_persist_ms=_i("SPIKE_PERSIST_MS", 300),
             scan_interval_s=_f("SCAN_INTERVAL_S", 0.1),
-            coinswitch_taker_fee_pct=_f("COINSWITCH_TAKER_FEE_PCT", 0.05),
+            coinswitch_taker_fee_pct=_f("COINSWITCH_TAKER_FEE_PCT", 0.065),
             coindcx_taker_fee_pct=_f("COINDCX_TAKER_FEE_PCT", 0.059),
             coinswitch_exec_latency_s=_f("COINSWITCH_EXEC_LATENCY_S", 1.0),
             coindcx_exec_latency_s=_f("COINDCX_EXEC_LATENCY_S", 1.9),
@@ -1047,6 +1047,8 @@ class BotEngine:
             self._tasks.append(asyncio.create_task(self._feed_watchdog_loop()))
         if self.coindcx and self.cfg.laggard_exchange == "coindcx":
             self._tasks.append(asyncio.create_task(self._keep_warm_loop()))
+        if self.coinswitch and self.cfg.laggard_exchange == "coinswitch":
+            self._tasks.append(asyncio.create_task(self._keep_warm_loop()))
         if self.telegram.enabled:
             self._tasks.append(asyncio.create_task(self._telegram_resolve_bot()))
             self._tasks.append(asyncio.create_task(self._daily_digest_loop()))
@@ -1108,12 +1110,21 @@ class BotEngine:
         except asyncio.CancelledError: pass
 
     async def _keep_warm_loop(self) -> None:
-        """Keep the CoinDCX HTTPS connection hot so order create doesn't pay DNS+TCP+TLS."""
+        """Keep the laggard exchange's HTTPS connection hot so order create doesn't pay DNS+TCP+TLS."""
+        client = self.coindcx if self.cfg.laggard_exchange == "coindcx" else self.coinswitch
         try:
-            while self.running:
-                await self.coindcx.keep_warm()
+            while self.running and client:
+                await client.keep_warm()
                 await asyncio.sleep(15)
         except asyncio.CancelledError: pass
+
+    def exec_health(self) -> Optional[Dict[str, Any]]:
+        client = self.coindcx if self.cfg.laggard_exchange == "coindcx" else self.coinswitch
+        if not client: return None
+        return {"exchange": self.cfg.laggard_exchange, "last_create_ms": client.last_create_ms,
+                "last_fill_confirm_ms": client.last_fill_latency_ms, "last_warm_ms": client.last_warm_ms,
+                "last_warm_error": client.last_warm_error, "fills_via_rest": client.fills_via_rest,
+                "fills_via_ws": getattr(client, "fills_via_ws", 0)}
 
     def laggard_source(self) -> str:
         if self.simulator: return "SIMULATOR"
@@ -1150,6 +1161,7 @@ class BotEngine:
                 "rate_limiter": self.coinswitch.limiter_stats() if self.coinswitch else None,
             },
             "fx": self.fx.status(),
+            "exec": self.exec_health(),
             "liquidity_guard": {**self.liq_stats, "max_slippage_pct": self.cfg.max_slippage_pct,
                                 "phantom_frozen_s": self.cfg.phantom_frozen_s, "min_order_inr": self.cfg.min_order_inr,
                                 "max_entry_frozen_s": self.cfg.max_entry_frozen_s},
@@ -1550,14 +1562,18 @@ class BotEngine:
                     "fee": float(o.get("fee_amount") or 0), "status": str(o.get("status", "")), "leverage": lev,
                     "fill_source": self.coindcx.last_fill_source, "fill_latency_ms": self.coindcx.last_fill_latency_ms,
                     "create_ms": self.coindcx.last_create_ms}
+        sized = await self.coinswitch.size_qty(coin, qty, price_usdt, reduce_only)
+        if not reduce_only and price_usdt > 0 and sized * price_usdt > qty * price_usdt * 1.5 + 1e-9:
+            raise SlotTooSmall(f"{coin} CoinSwitch minimum ≈ {sized * price_usdt:.2f} USDT exceeds slot notional {qty * price_usdt:.2f} USDT")
         placed = await self.coinswitch.place_order(symbol=f"{coin}USDT", side=side, order_type="MARKET",
-                                                   quantity=qty, reduce_only=reduce_only)
+                                                   quantity=sized, reduce_only=reduce_only)
         oid = (placed.get("data") or {}).get("order_id")
         if not oid: raise RuntimeError(f"CoinSwitch place_order missing order_id: {placed}")
         d = (await self.coinswitch.wait_for_fill(oid, timeout_s=self.cfg.live_order_timeout_s)).get("data") or {}
         return {"order_id": oid, "exec_qty": float(d.get("exec_quantity") or 0),
                 "avg_px": float(d.get("avg_execution_price") or 0), "fee": float(d.get("execution_fee") or 0),
-                "status": d.get("status", "")}
+                "status": d.get("status", ""), "fill_source": "REST",
+                "fill_latency_ms": self.coinswitch.last_fill_latency_ms, "create_ms": self.coinswitch.last_create_ms}
 
     async def _position_manager_loop(self) -> None:
         try:
@@ -1747,8 +1763,8 @@ class BotEngine:
             "avg_create_ms": round(self.total_create_ms / n_live) if n_live else None,
             "avg_fill_confirm_ms": round(self.total_fill_confirm_ms / n_live) if n_live else None,
             "live_fill_samples": n_live,
-            "last_create_ms": self.coindcx.last_create_ms if self.coindcx else None,
-            "last_fill_confirm_ms": self.coindcx.last_fill_latency_ms if self.coindcx else None,
+            "last_create_ms": (self.exec_health() or {}).get("last_create_ms"),
+            "last_fill_confirm_ms": (self.exec_health() or {}).get("last_fill_confirm_ms"),
             "spike_filter": {**self.spike_stats, "persist_ms": self.cfg.spike_persist_ms,
                              "arming": sorted(c for c, s in self._last_signal_state.items() if s.startswith("ARMING"))},
             "started_at": self.started_at,

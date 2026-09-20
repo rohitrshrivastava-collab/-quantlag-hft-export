@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import random
 import time
@@ -62,6 +63,32 @@ class CoinSwitchFuturesClient:
         default_pm = int(os.environ.get("CS_RATE_LIMIT_DEFAULT_PER_MIN", "60"))
         self.limiter = RateLimiterGroup(default_pm, {p: orders_pm for p in ORDER_PATHS})
         self.http_429_count = 0
+        self._sess: Optional[aiohttp.ClientSession] = None
+        self._specs: Dict[str, Dict[str, Any]] = {}
+        self.last_create_ms: Optional[int] = None
+        self.last_fill_latency_ms: Optional[int] = None
+        self.last_warm_ms: Optional[int] = None
+        self.last_warm_error: str = ""
+        self.fills_via_rest = 0
+
+    async def _session(self) -> aiohttp.ClientSession:
+        """One warm keep-alive session so order placement skips DNS+TCP+TLS."""
+        if self._sess is None or self._sess.closed:
+            conn = aiohttp.TCPConnector(limit=8, ttl_dns_cache=300, keepalive_timeout=60, enable_cleanup_closed=True)
+            self._sess = aiohttp.ClientSession(timeout=self._timeout, connector=conn)
+        return self._sess
+
+    async def keep_warm(self) -> None:
+        try:
+            t0 = time.perf_counter()
+            await self.ticker("BTCUSDT")
+            self.last_warm_ms = round((time.perf_counter() - t0) * 1000)
+            self.last_warm_error = ""
+        except Exception as e:
+            self.last_warm_error = str(e)[:80]
+
+    async def close(self) -> None:
+        if self._sess and not self._sess.closed: await self._sess.close()
 
     # ------------------------- signing / transport --------------------------
     def _sign(self, method: str, path: str,
@@ -93,22 +120,25 @@ class CoinSwitchFuturesClient:
         await self.limiter.acquire(path)
         headers, signed_path = self._sign(method, path, params)
         url = self.base_url + signed_path
-        async with aiohttp.ClientSession(timeout=self._timeout) as s:
-            async with s.request(method, url, headers=headers,
-                                 data=json.dumps(body) if body is not None else None) as r:
-                text = await r.text()
-                try:
-                    payload = json.loads(text) if text else {}
-                except Exception:
-                    payload = {"raw": text}
-                if r.status == 429 and _attempt < 2:
-                    self.http_429_count += 1
-                    retry_after = float(r.headers.get("Retry-After") or 0) or (1.5 * (2 ** _attempt))
-                    await asyncio.sleep(retry_after + random.uniform(0.05, 0.4))
-                    return await self._request(method, path, params, body, _attempt + 1)
-                if r.status >= 400:
-                    raise CoinSwitchError(r.status, payload)
-                return payload
+        s = await self._session()
+        t0 = time.perf_counter()
+        async with s.request(method, url, headers=headers,
+                             data=json.dumps(body) if body is not None else None) as r:
+            text = await r.text()
+            try:
+                payload = json.loads(text) if text else {}
+            except Exception:
+                payload = {"raw": text}
+            if method.upper() == "POST" and path.endswith("/futures/order"):
+                self.last_create_ms = round((time.perf_counter() - t0) * 1000)
+            if r.status == 429 and _attempt < 2:
+                self.http_429_count += 1
+                retry_after = float(r.headers.get("Retry-After") or 0) or (1.5 * (2 ** _attempt))
+                await asyncio.sleep(retry_after + random.uniform(0.05, 0.4))
+                return await self._request(method, path, params, body, _attempt + 1)
+            if r.status >= 400:
+                raise CoinSwitchError(r.status, payload)
+            return payload
 
     def limiter_stats(self) -> Dict[str, Any]:
         d = self.limiter.stats()
@@ -175,6 +205,23 @@ class CoinSwitchFuturesClient:
                                    body={"exchange": EXCHANGE_ID, "symbol": symbol.upper(), "leverage": int(leverage)})
 
     # ------------------------- helpers ---------------------------------------
+    async def spec(self, symbol: str) -> Dict[str, Any]:
+        symbol = symbol.upper()
+        if symbol not in self._specs:
+            info = (await self.instrument_info(symbol)).get("data") or {}
+            self._specs[symbol] = info.get(symbol) or next(iter(info.values()), {}) if info else {}
+        return self._specs[symbol]
+
+    async def size_qty(self, coin: str, qty: float, price_usdt: float, reduce_only: bool) -> float:
+        """Snap to base_quantity_step_size; entries floored but lifted to min_base_quantity."""
+        sp = await self.spec(f"{coin}USDT")
+        step = float(sp.get("base_quantity_step_size") or sp.get("lot_size") or 1e-6)
+        min_q = float(sp.get("min_base_quantity") or step)
+        q = round(qty / step) * step if reduce_only else math.floor(qty / step) * step
+        q = max(q, min_q)
+        prec = int(sp.get("quantity_precision", 8) or 0)
+        return float(f"{q:.{prec}f}")
+
     async def wait_for_fill(self, order_id: str, timeout_s: float = 5.0,
                             poll_s: float = 0.25) -> Dict[str, Any]:
         """Poll get_order_status until terminal or timeout.
@@ -182,7 +229,8 @@ class CoinSwitchFuturesClient:
         (For Futures, PARTIALLY_EXECUTED is terminal — the unfilled remainder is dead.)
         """
         terminal = {"EXECUTED", "PARTIALLY_EXECUTED", "CANCELLED", "REJECTED", "EXPIRED"}
-        deadline = time.time() + timeout_s
+        t0 = time.time()
+        deadline = t0 + timeout_s
         last: Dict[str, Any] = {}
         while time.time() < deadline:
             try:
@@ -191,6 +239,8 @@ class CoinSwitchFuturesClient:
                 await asyncio.sleep(poll_s); continue
             status = (last.get("data", {}) or {}).get("status", "")
             if status in terminal:
+                self.fills_via_rest += 1
+                self.last_fill_latency_ms = round((time.time() - t0) * 1000)
                 return last
             await asyncio.sleep(poll_s)
         return last

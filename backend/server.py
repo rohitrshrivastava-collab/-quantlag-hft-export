@@ -60,9 +60,11 @@ async def lifespan(app: FastAPI):
     # Auto-start bot in paper mode on server boot (dashboard shows live data)
     await ENGINE.start()
     await SHADOW.start()
+    trial_task = asyncio.create_task(coinswitch_trial_watcher())
     try:
         yield
     finally:
+        trial_task.cancel()
         await ENGINE.stop()
         mongo_client.close()
 
@@ -156,6 +158,42 @@ async def set_laggard(body: LaggardUpdate):
 
 
 WALLET_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+TRIAL: Dict[str, Any] = {"armed": False, "waiting": False, "last_usdt": None, "message": "", "armed_at": None}
+
+
+async def coinswitch_trial_watcher() -> None:
+    """Arms the 1-slot CoinSwitch trial the moment USDT lands in the futures wallet."""
+    while True:
+        try:
+            if (ENGINE.coinswitch and ENGINE.cfg.laggard_exchange == "coinswitch"
+                    and not ENGINE.cfg.paper_trading and not TRIAL["armed"]):
+                w = await ENGINE.wallet()
+                usdt = next((b["balance"] for b in w.get("balances", []) if b["currency"] == "USDT"), 0.0)
+                TRIAL["last_usdt"] = usdt
+                TRIAL["waiting"] = usdt < 4.0
+                if usdt >= 4.0 and not await ENGINE.store.all_open():
+                    equity = round(usdt * max(ENGINE.fx.rate, 1e-6) * 0.98, 2)
+                    await ENGINE.reset_account(equity)
+                    ENGINE.cfg.num_slots = 1
+                    errors = await ENGINE.apply_leverage(10)
+                    ENGINE.persist()
+                    TRIAL.update(armed=True, waiting=False, armed_at=time.time(),
+                                 message=f"CoinSwitch trial armed: {usdt:.2f} USDT → equity ₹{equity}, 1 slot, 10x" + (f" (leverage errors: {errors[:2]})" if errors else ""))
+                    await ENGINE.store.log("INFO", TRIAL["message"])
+                    try: await ENGINE.telegram.send(TRIAL["message"])
+                    except Exception: pass
+                else:
+                    TRIAL["message"] = f"Waiting for USDT in CoinSwitch futures wallet (now {usdt:.4f} USDT, need ≥ 4)"
+            else:
+                TRIAL["waiting"] = False
+        except Exception as e:
+            TRIAL["message"] = f"trial watcher error: {e}"
+        await asyncio.sleep(20)
+
+
+@api.get("/coinswitch/trial")
+async def coinswitch_trial():
+    return {**TRIAL, "laggard_exchange": ENGINE.cfg.laggard_exchange, "mode": "PAPER" if ENGINE.cfg.paper_trading else "LIVE"}
 
 
 @api.get("/wallet")

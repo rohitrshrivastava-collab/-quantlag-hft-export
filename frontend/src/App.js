@@ -557,6 +557,9 @@ function FeedHealthStrip({ feed }) {
       {ld && pill("feed-leader-badge", `BINANCE ${ld.connected ? "WS UP" : "WS DOWN"} · ${ld.coins_with_quotes}/10`,
         ld.connected ? SOURCE_STYLE.COINSWITCH_WS : SOURCE_STYLE.STALE)}
       {feed.rest_fallback?.active && pill("feed-rest-fallback-badge", "REST FALLBACK ACTIVE", SOURCE_STYLE.REST_POLLER)}
+      {feed.exec && feed.exec.exchange === "coinswitch" && pill("feed-exec-badge",
+        `CS ORDERS · REST${feed.exec.last_create_ms != null ? ` · create ${feed.exec.last_create_ms} ms` : ""}${feed.exec.last_fill_confirm_ms != null ? ` · fill ${feed.exec.last_fill_confirm_ms} ms` : ""}${feed.exec.last_warm_ms != null ? ` · warm ${feed.exec.last_warm_ms} ms` : ""}${feed.exec.last_warm_error ? " · WARM ERR" : ""}`,
+        feed.exec.last_warm_error ? SOURCE_STYLE.STALE : "border-violet-800 bg-violet-950/40 text-violet-300")}
       {feed.user_ws && feed.user_ws.active && pill("feed-user-ws-badge",
         `DCX FILLS · ${feed.user_ws.joined ? "WS LIVE" : feed.user_ws.connected ? "WS JOINING" : "WS DOWN"} · ${feed.user_ws.order_updates} upd${feed.user_ws.last_create_ms != null ? ` · create ${feed.user_ws.last_create_ms} ms` : ""}${feed.user_ws.last_fill_latency_ms != null ? ` · fill ${feed.user_ws.last_fill_source} ${feed.user_ws.last_fill_latency_ms} ms` : ""}${feed.user_ws.last_warm_ms != null ? ` · warm ${feed.user_ws.last_warm_ms} ms` : ""}`,
         feed.user_ws.joined ? "border-violet-800 bg-violet-950/40 text-violet-300" : SOURCE_STYLE.STALE)}
@@ -721,9 +724,13 @@ function Dashboard() {
     pull();
   };
   const [wallet, setWallet] = useState(null);
+  const [trial, setTrial] = useState(null);
   const [pairSwitching, setPairSwitching] = useState(false);
   const [pairMsg, setPairMsg] = useState(null);
-  const pullWallet = async () => { try { const r = await axios.get(`${API}/wallet`); setWallet(r.data); } catch (e) { console.error(e); } };
+  const pullWallet = async () => {
+    try { const r = await axios.get(`${API}/wallet`); setWallet(r.data); } catch (e) { console.error(e); }
+    try { const t = await axios.get(`${API}/coinswitch/trial`); setTrial(t.data); } catch (e) { /* optional */ }
+  };
   useEffect(() => { pullWallet(); const id = setInterval(pullWallet, 10000); return () => clearInterval(id); }, []);
   const togglePair = async () => {
     if (!status || pairSwitching) return;
@@ -944,6 +951,13 @@ function Dashboard() {
           <div data-testid="pair-switch-message" className={`rounded border px-3 py-2 text-xs font-mono flex items-center justify-between gap-3 ${pairMsg.level === "ok" ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : pairMsg.level === "warn" ? "border-amber-800 bg-amber-950/30 text-amber-300" : "border-rose-800 bg-rose-950/30 text-rose-300"}`}>
             <span>{pairMsg.level === "ok" ? "✓" : "⚠"} {pairMsg.text}</span>
             <button data-testid="pair-switch-dismiss" onClick={() => setPairMsg(null)} className="text-slate-400 hover:text-slate-200">dismiss</button>
+          </div>
+        )}
+
+        {trial && trial.laggard_exchange === "coinswitch" && trial.mode === "LIVE" && (trial.waiting || trial.armed) && (
+          <div data-testid="coinswitch-trial-banner" className={`rounded border px-3 py-2 text-xs font-mono ${trial.armed ? "border-emerald-800 bg-emerald-950/30 text-emerald-300" : "border-amber-800 bg-amber-950/30 text-amber-200"}`}>
+            {trial.armed ? "✓ " : "⏳ "}{trial.message}
+            {trial.waiting && <span className="text-slate-400"> — in the CoinSwitch PRO app: buy USDT with your INR (spot), then Portfolio → USDT → Transfer to Futures wallet. The trial arms itself automatically (1 slot, 10x).</span>}
           </div>
         )}
 
