@@ -1,0 +1,30 @@
+{
+  "summary": "Iteration 12 - phantom-liquidity guard + shadow head-to-head compare. Backend: 9/9 pytest passed (BASE=REACT_APP_BACKEND_URL). /api/spreads: every item has liquidity{state in LIQUID/THIN/PHANTOM/NO_DEPTH, vwap_inr, slippage_pct>=0, fillable_inr, depth_inr, levels<=20, frozen_s>=0, notional_inr, dyn_hurdle_pct>=fees+extra=0.12}. /api/liquidity/DOGE?direction=SHORT&notional_inr=5000 returns book_inr with bids desc & asks asc (<=10 rows each of [price,qty]); /api/liquidity/FOO -> 404. /api/config has max_slippage_pct=0.05, phantom_frozen_s=3, min_order_inr=100, depth_bps=10; PUT roundtrip {0.08,4,120} persists and restored to defaults; PUT max_slippage_pct=5 -> 422. /api/compare: runtime_s numeric, primary='coindcx', exchanges.coinswitch+coindcx both connected+subscribed with signals/trades/net_inr/net_inr_per_hour/lag_window_s{median,p75,n}/catch_up_s/avg_abs_spread_pct/slippage_pct{median,p90}/depth_10bps_inr/slippage_ladder{10000,100000,1000000}/skips{phantom,thin,edge,shrunk}/feed/equity_curve; verdict has winner/confidence (low|medium|high|none)/non-empty lines. /api/telemetry.feed.liquidity_guard has phantom/thin/edge_skips + shrunk ints and max_slippage_pct. /api/positions/closed items include liq_state, liq_slippage_pct, requested_notional_inr (blank/0 on older LIVE trades). Frontend at 1920x4000 and 390x844: compare-panel visible, compare-table has 'CoinSwitch','CoinDCX','Slippage ladder', compare-verdict visible, config-max-slippage-input / config-phantom-frozen-input / config-min-order-input all present; spread-liquidity-BTC/DOGE/SOL rows render with spread-liq-state-* badge='LIQUID'; no horizontal page overflow on either viewport (scrollWidth==clientWidth). compare-reset was NOT clicked; mode/account controls not touched. Bot left running in LIVE mode as instructed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "BenchmarkPanel select (App.js ~line 404)", "issues": ["Pre-existing hydration warning: <span> inside <option>. Non-blocking, previously flagged in iter10/iter11."]},
+      {"screen": "Equity/sparkline charts on initial mount", "issues": ["Recharts width/height(-1) warnings on first render; cosmetic only."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_backend_iter12.py",
+    "/app/test_reports/pytest/iter12.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Compare verdict.confidence returns literal 'none' (not just low/medium/high) when there is insufficient data (0 trades / 0 signals). Fine, but document valid values in API contract so downstream UIs don't break.",
+    "/api/spreads items no longer expose 'hurdle_pct' at top level (only dyn_hurdle_pct nested in liquidity). If any older client relied on the flat 'hurdle_pct' field on the spread row, this is a breaking shape change - verified frontend already migrated.",
+    "requested_notional_inr / liq_state / liq_slippage_pct persisted as 0/'' for legacy closed positions - harmless but consider backfilling with null vs 0 to distinguish 'no data' from 'zero slippage'."
+  ],
+  "updated_files": ["/app/backend/tests/test_backend_iter12.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "test_credentials": "n/a - no auth. CoinDCX keys in backend/.env are REAL MONEY; never send confirm:true, never POST /api/bot/mode etc.",
+  "seed_data_creation": "none. PUT /api/config was used to flip 3 knobs and immediately restored to defaults (0.05 / 3 / 100).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Bot is running in LIVE mode per user's dashboard settings (paper_trading=false, num_slots=4, equity ₹601, laggard=coindcx). Every coin is currently skipped because slot < exchange minimum, so no real orders occur - DO NOT change mode/equity/slots and DO NOT call POST /api/compare/reset. Shadow compare runs both CS+DCX in parallel; verdict.confidence can be 'none' when trades=0. /api/spreads.items[].liquidity is the new nested block (dyn_hurdle_pct there, no flat hurdle_pct on the row). /api/liquidity/{coin} accepts direction=LONG|SHORT and notional_inr query params; unknown coin -> 404. Book rows: bids desc, asks asc, top-10 in response, engine keeps top-20.",
+  "rca of the issue": "n/a - all tests pass"
+}

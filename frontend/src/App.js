@@ -585,9 +585,11 @@ function ComparePanel({ data, onReset }) {
   const v = data?.verdict;
   const g = (m, ...p) => p.reduce((a, k) => (a && a[k] !== undefined ? a[k] : null), m);
   const rows = [
+    ["Price-lag behind Binance (median / p90)", (m) => `${g(m, "response_lag_s", "median") ?? "—"}s / ${g(m, "response_lag_s", "p90") ?? "—"}s · n=${g(m, "response_lag_s", "n") ?? 0}`, "time to follow a ≥2 bp Binance move"],
     ["Mean |divergence| vs Binance", (m) => m.avg_abs_spread_pct != null ? `${Number(m.avg_abs_spread_pct).toFixed(4)}%` : "—", "higher = wider lag"],
     ["Lag window (median / p75)", (m) => `${g(m, "lag_window_s", "median") ?? "—"}s / ${g(m, "lag_window_s", "p75") ?? "—"}s · n=${g(m, "lag_window_s", "n") ?? 0}`, "|spread| ≥ hurdle until it decays"],
     ["Catch-up signal→target (median)", (m) => g(m, "catch_up_s", "median") != null ? `${g(m, "catch_up_s", "median")}s` : "—", "the exploitable window"],
+    ["Laggard bid-ask spread (median / p90)", (m) => `${g(m, "book_spread_pct", "median") != null ? Number(g(m, "book_spread_pct", "median")).toFixed(4) + "%" : "—"} / ${g(m, "book_spread_pct", "p90") != null ? Number(g(m, "book_spread_pct", "p90")).toFixed(4) + "%" : "—"}`, "half paid on entry, half on exit"],
     ["Entry slippage @ slot (median / p90)", (m) => `${g(m, "slippage_pct", "median") ?? "—"}% / ${g(m, "slippage_pct", "p90") ?? "—"}%`, "walk-the-book VWAP vs top"],
     ["Depth within ±10 bps (median)", (m) => fmtCompact(g(m, "depth_10bps_inr", "median")), "phantom-liquidity buffer"],
     ["Slippage ladder ₹10k / ₹1L / ₹10L", (m) => ["10000", "100000", "1000000"].map((n) => { const s = g(m, "slippage_ladder", n, "median"); return s == null ? "—" : s >= 100 ? "∅" : `${Number(s).toFixed(3)}%`; }).join(" / "), "worst side, median"],

@@ -133,3 +133,76 @@ Cap `opps_per_min` at the API limit: Pair A ≈ 6/min (all slots), Pair B ≈ 30
 *Default to **Pair A (CoinSwitch PRO)** for a ₹4,000 / 10-slot book*: lowest fees, simplest and most robust book feed, and the 20 req/min order cap is not binding at this capital level (you will rarely see > 6 tradable dislocations a minute after a 15 bps hurdle).
 
 *Switch to **Pair B (CoinDCX)*** when (a) your benchmark shows Pair A capped by the API limit, (b) you obtain a CoinDCX VIP tier that brings taker ≤ 0.05 %, or (c) you want INR-margined contracts and WS order/position updates to drop fill polling. Pair B is the scaling path; Pair A is the cheapest place to prove the edge.
+
+---
+
+## 5. Phantom liquidity & the lag-vs-latency question (2026-06, measured)
+
+### 5.1 What the bot now does before every entry (`backend/liquidity.py`, `BotEngine.liquidity`)
+Both laggard WS feeds keep the top-20 levels. Before committing a slot the engine walks the
+book on the side it would hit (LONG → asks, SHORT → bids) and computes:
+
+| Check | Rule | Outcome |
+|---|---|---|
+| **Frozen book (PHANTOM)** | top-5 levels unchanged for `PHANTOM_FROZEN_S` (3 s) while Binance ticked in the last 2 s | skip, state `PHANTOM` |
+| **Absorbable size** | largest notional whose VWAP stays within `MAX_SLIPPAGE_PCT/2` (0.025 %) of top | shrink slot to it; skip (`THIN`) if below `MIN_ORDER_INR` (₹100) |
+| **Slippage-aware hurdle** | `fees + max(flat buffer, 2 × measured one-side slippage) + extra` | skip (`THIN`) when the basis-adjusted spread no longer clears it |
+| **Paper fills** | entry/exit at walk-the-book VWAP, not top-of-book | realistic paper PnL |
+
+Per-coin state is on every spread card (`LIQUID / THIN / PHANTOM`, slip %, ±10 bp depth,
+frozen seconds) and in `GET /api/liquidity/{coin}`; counters in `telemetry.feed.liquidity_guard`.
+
+### 5.2 Head-to-head shadow (`backend/shadow.py`, `GET /api/compare`)
+Both books stream simultaneously; identical rules are paper-traded on each with its own
+fee (CoinSwitch 0.05 %/side, CoinDCX 0.059 %/side) and measured execution latency
+(CoinSwitch assumed 1.0 s — no keys yet; CoinDCX 1.9 s measured live: create ≈1.2 s + fill
+push ≈0.7 s). Sample below: 18 min, 10 coins, hurdle 0.15 %, basis filter on, 45 s timeout,
+preview pod (~120 ms from both exchanges).
+
+| Metric | CoinSwitch PRO | CoinDCX |
+|---|---|---|
+| Price-lag behind Binance — median time to follow a ≥2 bp move | **0.34 s** | 0.46 s |
+| … p75 / p90 | 2.3 s / **≥10 s** (12 % never follow within 10 s) | 0.58 s / 4.0 s (6 % timeouts) |
+| Mean \|divergence\| vs Binance (basis-adjusted) | **0.0069 %** | 0.0034 % |
+| Time \|spread\| stays ≥ hurdle (lag window, median) | 0.12 s | 0.33 s |
+| Laggard bid-ask spread (median / p90) | 0.009 % / 0.045 % | 0.009 % / 0.045 % |
+| Slippage at ₹10k / ₹1L / ₹10L (worst side, median) | 0 / 0 / 0.006 % | 0 / 0 / 0 % |
+| Depth within ±10 bps (median) | ₹76 L | ₹78 L |
+| Signals → trades / win rate | 67 → 66 / 6 % | 48 → 48 / 10 % |
+| Gross · fees · **net** | −1.6 · 9.9 · **−11.5** (−39 ₹/h) | −3.1 · 8.5 · **−11.6** (−39 ₹/h) |
+
+### 5.3 Reading it
+1. **Both books are mirrors of Binance USDT-M.** Top-of-book sizes (≈300k DOGE, 5–7 BTC) and the
+   0.009 % spread are Binance's own. "Phantom liquidity" here is literal: the depth you see is
+   not local resting interest, it is a delayed copy. For retail slot sizes (≤ ₹1 L) walk-the-book
+   slippage is ~0 on both; the risk is not thin depth, it is a **stale quote** — which is exactly
+   what the frozen-book gate catches. CoinSwitch's book freezes/lags for >10 s on ~12 % of
+   Binance moves vs 6 % on CoinDCX.
+2. **CoinSwitch does lag more — but not in the way that pays.** Its mean divergence is 2× CoinDCX's
+   and it has a fat tail of long freezes, but the *typical* catch-up is 0.34 s vs 0.46 s: both are
+   **shorter than the fastest execution path we have (≈1–2 s)**. By the time a market order lands,
+   the 0.15 % dislocation that triggered it has already closed; the trade then exits on noise and
+   pays two taker fees. That is why both sides show ~6–10 % win rates and near-identical −39 ₹/h.
+3. **The fat tail is not tradable either.** The >10 s freezes on CoinSwitch are precisely the
+   PHANTOM cases — the quote is stale, so hitting it fills at the exchange's *real* (already
+   moved) price, or gets rejected. Wider window ≠ exploitable window when the book is frozen.
+4. **CoinDCX's tighter tail + INR margin + WS fills vs CoinSwitch's lower fee and marginally faster
+   assumed execution cancel out** at ~0.15 % hurdle: the shadow verdict flips between the two on
+   noise (confidence "low" until ≥1 h and ≥60 trades).
+
+### 5.4 Answer: does the wider CoinSwitch window outweigh CoinDCX's tighter matching?
+**No — not with market orders at 1–2 s execution.** Neither exchange's lag exceeds our execution
+latency in the median, and the part of CoinSwitch's lag that does (the ≥10 s freeze tail) is
+phantom liquidity by definition. Net profitability potential is statistically indistinguishable
+(−39 ₹/h vs −39 ₹/h on 10 coins × ₹150 slots; scales linearly with size since slippage ≈ 0).
+
+What *would* change the answer (in order of leverage):
+- **Cut execution latency below the lag**: pre-warmed HTTPS session / pre-signed orders on
+  CoinDCX (target < 400 ms create), run from Mumbai EC2 (−100 ms), use the WS fill push (done).
+- **Trade the tail, not the median**: raise the hurdle to 0.25–0.35 % so only genuine multi-second
+  dislocations trigger, and require `frozen_s < 1 s` (fresh book) — the shadow panel will show
+  whether ≥1 in 3 of those close at target.
+- **Post, don't take**: rest a limit at the stale price on the laggard when Binance jumps
+  (maker fee 0.025 % on CoinDCX) — flips the fee drag and turns the lag into edge.
+- Re-run `/api/compare` for ≥1 h at IST market-open (09:00–10:30) and US-open (19:00–20:30)
+  when Binance moves are larger and Indian books freeze more.

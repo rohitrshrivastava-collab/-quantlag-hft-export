@@ -204,10 +204,38 @@ SQLite persistence, paper/live toggle.
   1820.62 → 1816.72 INR, exchange flat. Bot returned to PAPER afterwards.
 - Testing: `iteration_11.json` backend 8/8, frontend pass (1920 + 390 px).
 
+### Iteration 12 (2026-06, "Phantom-liquidity guard · CoinSwitch vs CoinDCX shadow head-to-head")
+- `liquidity.py`: walk-the-book VWAP, `fillable_within(max_slip)`, ±bps depth, frozen-book
+  detection. Feeds keep top-20 depth + `book_change_ts`; `frozen_s(coin)`.
+- Engine: `liquidity(coin, dir, notional)` before every entry → PHANTOM/NO_DEPTH skip,
+  THIN skip below `MIN_ORDER_INR`, else **shrink** to fillable; dynamic hurdle
+  `fees + max(buffer, 2×slip) + extra`; paper entry/exit at VWAP. New signal states
+  PHANTOM/THIN; `Position.liq_state/liq_slippage_pct/requested_notional_inr`;
+  `telemetry.feed.liquidity_guard`; `/api/spreads[].liquidity`; `GET /api/liquidity/{coin}`.
+  Config (persisted, PUT /api/config, dashboard inputs): `max_slippage_pct` 0.05,
+  `phantom_frozen_s` 3, `min_order_inr` 100 (+ `depth_bps` 10 env).
+- `shadow.py` ShadowRunner: second laggard feed + identical rules paper-simulated on BOTH
+  exchanges (own fee/latency: CS 0.05%/1.0 s, DCX 0.059%/1.9 s), 10 Hz. Metrics: response
+  lag to ≥2 bp Binance moves, lag window, catch-up time, book spread, slippage ladder
+  ₹10k/1L/10L, depth, skips, PnL/h, verdict. `GET /api/compare`, `POST /api/compare/reset`,
+  dashboard ComparePanel + LiquidityRow per coin.
+- Findings (18 min sample, docs §5): both books mirror Binance (spread 0.009%, slippage ≈0
+  to ₹10L); CoinSwitch lags 2× more on average (0.0069% vs 0.0034% divergence) with a
+  12% >10 s freeze tail, but median catch-up 0.34 s vs 0.46 s — both SHORTER than 1–2 s
+  execution → both net ≈ −39 ₹/h at 0.15% hurdle. Wider window does NOT outweigh; the
+  lever is execution latency / maker orders / higher hurdle on fresh books.
+- Note: user switched dashboard to LIVE (₹601, 4 slots, CoinDCX); all coins skipped by
+  SlotTooSmall (₹150 slot < exchange min ≈ ₹600) so no real orders fire.
+- Testing: `iteration_12.json` backend 9/9, frontend pass (1920 + 390 px).
+
 ## Current data files (DATA_DIR, default /app/data)
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 
 ## Prioritized backlog
+- P1: Execution latency below the measured lag (0.34–0.46 s): warm keep-alive session +
+  pre-signed CoinDCX orders, Mumbai EC2. Then re-run `/api/compare` ≥1 h at IST/US open.
+- P1: Maker-mode variant (rest limit at stale laggard price when Binance jumps) to flip fee drag.
+- P1: Fresh-book filter for entries (`frozen_s < 1 s`) + hurdle 0.25–0.35% experiment via shadow.
 - P1: Execution latency: CoinDCX order create REST ≈1.2 s + fill confirm 0.6–0.9 s
   → ~2 s round trip. Consider pre-warmed aiohttp session / keep-alive for the
   order path, and widen hurdle or use limit-IOC to survive the delay.

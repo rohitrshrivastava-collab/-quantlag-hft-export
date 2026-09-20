@@ -49,12 +49,38 @@ class ShadowExchange:
         self.reasons: Dict[str, int] = {}
         self.equity_curve: List[Dict[str, float]] = []
         self.ladder: Dict[int, List[float]] = {n: [] for n in LADDER_INR}   # notional → one-side slippage % samples
+        self.book_spreads: List[float] = []   # laggard's own bid-ask spread %
+        self.response_lags: List[float] = []  # s from a ≥2 bp Binance move until the laggard has followed ≥50% of it
+        self._lead_ref: Dict[str, float] = {}
+        self._lag_event: Dict[str, Dict[str, float]] = {}
         self._ladder_ts: Dict[str, float] = {}
+
+    def _track_response_lag(self, coin: str, now: float, leader_mid: float, lagg_mid: float) -> None:
+        ev = self._lag_event.get(coin)
+        if ev:
+            moved = (lagg_mid - ev["lag0"]) / ev["lag0"] * 1e4 * ev["dir"]
+            if moved >= 0.5 * ev["bps"]:
+                self.response_lags.append(now - ev["t0"]); self._lag_event.pop(coin)
+            elif now - ev["t0"] > 10:
+                self.response_lags.append(10.0); self._lag_event.pop(coin)
+            if len(self.response_lags) > 3000: self.response_lags = self.response_lags[-3000:]
+        ref = self._lead_ref.get(coin)
+        if ref is None:
+            self._lead_ref[coin] = leader_mid; return
+        bps = (leader_mid - ref) / ref * 1e4
+        if abs(bps) >= 2.0:
+            self._lead_ref[coin] = leader_mid
+            if coin not in self._lag_event:
+                self._lag_event[coin] = {"t0": now, "dir": 1.0 if bps > 0 else -1.0, "bps": abs(bps), "lag0": lagg_mid}
 
     def _sample_ladder(self, coin: str, now: float, feed, fx: float) -> None:
         if now - self._ladder_ts.get(coin, 0.0) < 2.0 or coin not in feed.depth: return
         self._ladder_ts[coin] = now
         bids, asks = feed.depth[coin]
+        if bids and asks:
+            mid = (bids[0][0] + asks[0][0]) / 2
+            self.book_spreads.append((asks[0][0] - bids[0][0]) / mid * 100)
+            if len(self.book_spreads) > 3000: self.book_spreads = self.book_spreads[-3000:]
         for n in LADDER_INR:
             worst = 0.0
             for levels in (bids, asks):
@@ -96,6 +122,7 @@ class ShadowExchange:
         hurdle = self.hurdle(cfg)
         leader_fresh = (now * 1000 - leader.ts_ms) < 2000
         self._sample_ladder(coin, now, feed, fx)
+        self._track_response_lag(coin, now, leader.mid, lagg.mid / fx)
 
         # lag-window episodes: |adj| ≥ hurdle → until it decays below half the hurdle
         if abs(adj) >= hurdle and coin not in self.episode_start:
@@ -189,6 +216,10 @@ class ShadowExchange:
             "lag_window_s": {"median": _median(self.lag_windows), "p75": _pct(self.lag_windows, 0.75), "n": len(self.lag_windows)},
             "catch_up_s": {"median": _median(self.target_holds), "p75": _pct(self.target_holds, 0.75), "n": len(self.target_holds)},
             "avg_abs_spread_pct": round(sum(self.spreads_abs) / len(self.spreads_abs), 4) if self.spreads_abs else None,
+            "book_spread_pct": {"median": _median(self.book_spreads), "p90": _pct(self.book_spreads, 0.9)},
+            "response_lag_s": {"median": _median(self.response_lags), "p75": _pct(self.response_lags, 0.75),
+                               "p90": _pct(self.response_lags, 0.9), "n": len(self.response_lags),
+                               "timeouts_pct": round(sum(1 for x in self.response_lags if x >= 10) / len(self.response_lags) * 100, 1) if self.response_lags else None},
             "slippage_pct": {"median": _median(self.slips), "p90": _pct(self.slips, 0.9)},
             "depth_10bps_inr": {"median": _median(self.depths)},
             "slippage_ladder": {str(n): {"median": _median(xs), "p90": _pct(xs, 0.9),
@@ -284,6 +315,11 @@ def verdict(ex: Dict[str, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
         for p in path:
             m = (m or {}).get(p) if isinstance(m, dict) else None
         return m
+    rl_cs, rl_dx = g(cs, "response_lag_s", "median"), g(dx, "response_lag_s", "median")
+    if rl_cs is not None and rl_dx is not None:
+        lines.append(f"Price-lag behind Binance (median time to follow a ≥2 bp move): CoinSwitch {rl_cs}s vs CoinDCX {rl_dx}s "
+                     f"(p90 {g(cs,'response_lag_s','p90')}s / {g(dx,'response_lag_s','p90')}s) → {'CoinSwitch slower' if rl_cs > rl_dx else 'CoinDCX slower' if rl_dx > rl_cs else 'equal'}; "
+                     f"exec latency assumed {cs['exec_latency_s']}s / {dx['exec_latency_s']}s — {'the lag is SHORTER than your execution time on both' if max(rl_cs, rl_dx) < min(cs['exec_latency_s'], dx['exec_latency_s']) else 'the lag exceeds execution time'}.")
     lw_cs, lw_dx = g(cs, "lag_window_s", "median"), g(dx, "lag_window_s", "median")
     if lw_cs is not None and lw_dx is not None:
         lines.append(f"Lag window (median): CoinSwitch {lw_cs}s vs CoinDCX {lw_dx}s → {'CoinSwitch wider' if lw_cs > lw_dx else 'CoinDCX wider' if lw_dx > lw_cs else 'equal'} ({abs(lw_cs - lw_dx):.1f}s).")
@@ -293,6 +329,9 @@ def verdict(ex: Dict[str, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
     cu_cs, cu_dx = g(cs, "catch_up_s", "median"), g(dx, "catch_up_s", "median")
     if cu_cs is not None and cu_dx is not None:
         lines.append(f"Catch-up time signal→target (median): CoinSwitch {cu_cs}s vs CoinDCX {cu_dx}s.")
+    bs_cs, bs_dx = g(cs, "book_spread_pct", "median"), g(dx, "book_spread_pct", "median")
+    if bs_cs is not None and bs_dx is not None:
+        lines.append(f"Laggard bid-ask spread (median): CoinSwitch {bs_cs:.4f}% vs CoinDCX {bs_dx:.4f}% → {'CoinDCX tighter' if bs_dx < bs_cs else 'CoinSwitch tighter'}; you pay half of this on entry and half on exit.")
     sl_cs, sl_dx = g(cs, "slippage_pct", "median"), g(dx, "slippage_pct", "median")
     if sl_cs is not None and sl_dx is not None:
         lines.append(f"Entry slippage at slot size (median): CoinSwitch {sl_cs:.3f}% vs CoinDCX {sl_dx:.3f}% → {'CoinDCX tighter' if sl_dx < sl_cs else 'CoinSwitch tighter'}.")
