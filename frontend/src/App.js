@@ -1088,6 +1088,7 @@ function Dashboard() {
                   <th className="text-right px-3 py-2">Entry</th>
                   <th className="text-right px-3 py-2">Target</th>
                   <th className="text-right px-3 py-2">Stop</th>
+                  <th className="text-right px-3 py-2">P/L (₹)</th>
                   <th className="text-right px-3 py-2">Hold</th>
                   <th className="text-right px-3 py-2">Action</th>
                 </tr>
@@ -1095,6 +1096,8 @@ function Dashboard() {
               <tbody>
                 {open.map((p) => {
                   const held = Math.floor((Date.now()/1000) - p.opened_at);
+                  const pnl = p.unrealized_net_inr;
+                  const pnlUp = typeof pnl === "number" && pnl >= 0;
                   return (
                     <tr key={p.id} data-testid={`open-position-row-${p.coin}`} className="border-b border-[#1E2638]/60 hover:bg-[#182030]">
                       <td className="px-3 py-2 font-bold text-slate-200">{p.coin}</td>
@@ -1103,6 +1106,9 @@ function Dashboard() {
                       <td className="px-3 py-2 text-right">{fmtNum(p.entry_price_inr, 6)}</td>
                       <td className="px-3 py-2 text-right text-cyan-300">{fmtNum(p.target_price_inr, 6)}</td>
                       <td className="px-3 py-2 text-right text-rose-300">{fmtNum(p.stop_price_inr, 6)}</td>
+                      <td data-testid={`open-position-pnl-${p.coin}`} className={`px-3 py-2 text-right font-bold ${typeof pnl !== "number" ? "text-slate-500" : pnlUp ? "text-emerald-400" : "text-rose-400"}`}>
+                        {typeof pnl === "number" ? `${pnl >= 0 ? "+" : ""}${pnl.toFixed(2)}` : "—"}
+                      </td>
                       <td className="px-3 py-2 text-right text-slate-400">{held}s / {Math.floor(p.timeout_at - p.opened_at)}s</td>
                       <td className="px-3 py-2 text-right">
                         <button data-testid={`close-position-btn-${p.coin}`} onClick={() => closePos(p.coin)} className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-100 text-[10px] font-bold uppercase tracking-wider transition-colors duration-150">Close</button>
@@ -1110,7 +1116,7 @@ function Dashboard() {
                     </tr>
                   );
                 })}
-                {!open.length && <tr><td colSpan={8} className="text-center py-6 text-slate-500">No open positions.</td></tr>}
+                {!open.length && <tr><td colSpan={9} className="text-center py-6 text-slate-500">No open positions.</td></tr>}
               </tbody>
             </table>
           </div>

@@ -343,6 +343,18 @@ SQLite persistence, paper/live toggle.
 
 - `settings.json`, `trades.json`, `ticks/YYYY-MM-DD.jsonl`, `../benchmark/last_result.json`
 
+### Iteration 20 (2026-06, "Open-position live P/L column + loss investigation")
+- `BotEngine.unrealized(pos)`: live mark-to-market of an open position (marked at the exit side,
+  less round-trip fees) → `mark_price_inr`, `unrealized_gross_inr`, `unrealized_net_inr`.
+  `GET /api/positions/open` merges these into each row.
+- Dashboard Open Positions table: new colour-coded **P/L (₹)** column (`open-position-pnl-{coin}`).
+- LOSS INVESTIGATION (user reported "all paper trades closed on loss"): NOT supported by data —
+  PAPER history = 361 trades, 82.8% win rate, net +₹8,097, 265 TARGET_HIT. Every position opens
+  ~₹1-3 RED (taker crosses bid-ask + 0.10% fees) and turns green only on convergence; TIMEOUTs net
+  small losses, TARGET_HITs win. Lowered 0.13% hurdle admits more marginal timeout-losers but
+  target-hits dominate. Fix if desired: raise the entry hurdle.
+
+
 ## Prioritized backlog
 - P1: Execution latency below the measured lag (0.34–0.46 s): warm keep-alive session +
   pre-signed CoinDCX orders, Mumbai EC2. Then re-run `/api/compare` ≥1 h at IST/US open.

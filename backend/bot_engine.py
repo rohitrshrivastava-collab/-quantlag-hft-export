@@ -1697,6 +1697,24 @@ class BotEngine:
         if not reason and now >= pos.timeout_at: reason = "TIMEOUT"
         if reason: await self._close_position(pos, cur, reason)
 
+    def unrealized(self, pos: Position) -> Dict[str, Any]:
+        """Live mark-to-market of an open position: what it would net if closed right now
+        (marked at the exit side, less the round-trip fees)."""
+        lagg = self._laggard(pos.coin)
+        if not lagg:
+            return {"mark_price_inr": None, "unrealized_gross_inr": None, "unrealized_net_inr": None}
+        cur = (lagg.bid if pos.direction == "LONG" else lagg.ask) * self._mark_fx(pos)
+        gross = (cur - pos.entry_price_inr) * pos.contracts if pos.direction == "LONG" \
+                else (pos.entry_price_inr - cur) * pos.contracts
+        notional = pos.notional_inr or pos.size_inr * max(1, pos.leverage)
+        if pos.mode == "LIVE":
+            fees = (pos.fees_inr or 0.0) + notional * self.cfg.exit_taker_fee_pct / 100.0
+        else:
+            fees = notional * (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct) / 100.0
+        return {"mark_price_inr": round(cur, 6), "unrealized_gross_inr": round(gross, 2),
+                "unrealized_net_inr": round(gross - fees, 2)}
+
+
     async def _close_position(self, pos: Position, price: float, reason: str) -> None:
         exit_fee_inr: Optional[float] = None
         exit_order_id: Optional[str] = None

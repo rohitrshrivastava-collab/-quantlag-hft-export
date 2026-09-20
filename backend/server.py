@@ -623,7 +623,7 @@ async def liquidity(coin: str, notional_inr: Optional[float] = None, direction: 
 
 @api.get("/positions/open")
 async def positions_open():
-    return {"items": [asdict(p) for p in await ENGINE.store.all_open()]}
+    return {"items": [{**asdict(p), **ENGINE.unrealized(p)} for p in await ENGINE.store.all_open()]}
 
 
 @api.post("/positions/{coin}/close")
