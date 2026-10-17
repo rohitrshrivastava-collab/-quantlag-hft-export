@@ -864,3 +864,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve the frontend's production build (yarn build) from the same process/port
+# when present, so deployment doesn't need a separate Node dev server running.
+# Mounted last and at "/" so it never shadows the /api/* routes above.
+_FRONTEND_BUILD = ROOT_DIR.parent / "frontend" / "build"
+if _FRONTEND_BUILD.exists():
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_BUILD), html=True), name="frontend")
