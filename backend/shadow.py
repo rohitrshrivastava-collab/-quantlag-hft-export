@@ -15,7 +15,7 @@ from liquidity import assess
 
 logger = logging.getLogger("shadow")
 EXCHANGES = ("coinswitch", "coindcx")
-LADDER_INR = (10_000, 100_000, 1_000_000)   # slippage ladder: how much size each book absorbs
+LADDER_USDT = (10_000, 100_000, 1_000_000)   # slippage ladder: how much size each book absorbs
 
 
 def _median(xs: List[float]) -> Optional[float]:
@@ -50,7 +50,7 @@ class ShadowExchange:
         self.gross = self.fees = self.net = 0.0
         self.reasons: Dict[str, int] = {}
         self.equity_curve: List[Dict[str, float]] = []
-        self.ladder: Dict[int, List[float]] = {n: [] for n in LADDER_INR}   # notional → one-side slippage % samples
+        self.ladder: Dict[int, List[float]] = {n: [] for n in LADDER_USDT}   # notional → one-side slippage % samples
         self.book_spreads: List[float] = []   # laggard's own bid-ask spread %
         self.response_lags: List[float] = []  # s from a ≥2 bp Binance move until the laggard has followed ≥50% of it
         self._lead_ref: Dict[str, float] = {}
@@ -83,7 +83,7 @@ class ShadowExchange:
             mid = (bids[0][0] + asks[0][0]) / 2
             self.book_spreads.append((asks[0][0] - bids[0][0]) / mid * 100)
             if len(self.book_spreads) > 3000: self.book_spreads = self.book_spreads[-3000:]
-        for n in LADDER_INR:
+        for n in LADDER_USDT:
             worst = 0.0
             for levels in (bids, asks):
                 liq = assess(levels, n / fx, 100.0, 10.0, 0.0, float("inf"))
@@ -105,20 +105,20 @@ class ShadowExchange:
     def hurdle(self, cfg, slip_one_side: float = 0.0) -> float:
         return 2 * self.fee_pct + max(cfg.slippage_buffer_pct, 2 * slip_one_side) + cfg.hurdle_extra_pct
 
-    def _liq(self, feed, coin: str, direction: str, notional_inr: float, fx: float, cfg, leader_fresh: bool):
+    def _liq(self, feed, coin: str, direction: str, notional_usdt: float, fx: float, cfg, leader_fresh: bool):
         if coin not in feed.depth: return None
         bids, asks = feed.depth[coin]
         levels = asks if direction == "LONG" else bids
-        liq = assess(levels, notional_inr / fx, cfg.max_slippage_pct / 2, cfg.depth_bps,
+        liq = assess(levels, notional_usdt / fx, cfg.max_slippage_pct / 2, cfg.depth_bps,
                      feed.frozen_s(coin), cfg.phantom_frozen_s if leader_fresh else float("inf"))
         return liq
 
     # ---- per-coin step -----------------------------------------------------------
-    def step(self, coin: str, now: float, leader, lagg, feed, fx: float, cfg, slot_notional_inr: float) -> None:
-        leader_inr_mid = leader.mid * fx
-        gross_pct = (leader_inr_mid - lagg.mid) / lagg.mid * 100.0
+    def step(self, coin: str, now: float, leader, lagg, feed, fx: float, cfg, slot_notional_usdt: float) -> None:
+        leader_usdt_mid = leader.mid * fx
+        gross_pct = (leader_usdt_mid - lagg.mid) / lagg.mid * 100.0
         basis = self._basis(coin, gross_pct, now, cfg.basis_window_s, cfg.basis_filter)
-        leader_ref = leader_inr_mid / (1 + basis / 100.0) if cfg.basis_filter else leader_inr_mid
+        leader_ref = leader_usdt_mid / (1 + basis / 100.0) if cfg.basis_filter else leader_usdt_mid
         long_edge = (leader_ref - lagg.ask) / lagg.ask * 100.0      # Binance above best ask → bullish lag
         short_edge = (lagg.bid - leader_ref) / lagg.bid * 100.0     # Binance below best bid → bearish lag
         adj = long_edge if long_edge > 0 else (-short_edge if short_edge > 0 else 0.0)
@@ -140,7 +140,7 @@ class ShadowExchange:
         p = self.pending.get(coin)
         if p and now >= p["fire_at"]:
             self.pending.pop(coin)
-            liq = self._liq(feed, coin, p["direction"], p["notional_inr"], fx, cfg, leader_fresh)
+            liq = self._liq(feed, coin, p["direction"], p["notional_usdt"], fx, cfg, leader_fresh)
             entry = (liq.vwap * fx) if (liq and liq.vwap > 0) else (lagg.ask if p["direction"] == "LONG" else lagg.bid)
             stop_pct = self.stop_fn(coin) if self.stop_fn else cfg.stop_loss_pct
             stop = entry * (1 - stop_pct / 100) if p["direction"] == "LONG" else entry * (1 + stop_pct / 100)
@@ -148,7 +148,7 @@ class ShadowExchange:
             target = p["target"]
             if cfg.breakeven_floor:
                 target = max(p["target"], entry * (1 + be)) if p["direction"] == "LONG" else min(p["target"], entry * (1 - be))
-            self.open[coin] = {**p, "target": target, "entry": entry, "stop": stop, "contracts": p["notional_inr"] / entry,
+            self.open[coin] = {**p, "target": target, "entry": entry, "stop": stop, "contracts": p["notional_usdt"] / entry,
                                "opened_at": now, "timeout_at": p["signal_ts"] + cfg.timeout_seconds}
             return
 
@@ -187,18 +187,18 @@ class ShadowExchange:
         self._armed.pop(coin, None)
         direction = side
         self.signals += 1
-        notional = slot_notional_inr
+        notional = slot_notional_usdt
         liq = self._liq(feed, coin, direction, notional, fx, cfg, leader_fresh)
         if liq:
             if liq.state in ("PHANTOM", "NO_DEPTH"):
                 self.phantom_skips += 1; return
             if liq.frozen_s > cfg.max_entry_frozen_s:
                 self.stale_skips += 1; return
-            fillable_inr = liq.fillable * fx
+            fillable_usdt = liq.fillable * fx
             share_cap = liq.depth_notional * fx * cfg.max_book_share_pct / 100.0
-            allowed = min(fillable_inr, share_cap) if share_cap > 0 else fillable_inr
+            allowed = min(fillable_usdt, share_cap) if share_cap > 0 else fillable_usdt
             if allowed < notional:
-                if allowed < cfg.min_order_inr:
+                if allowed < cfg.min_order_usdt:
                     self.thin_skips += 1; return
                 notional = allowed; self.shrunk += 1
                 liq = self._liq(feed, coin, direction, notional, fx, cfg, leader_fresh) or liq
@@ -206,16 +206,16 @@ class ShadowExchange:
                 self.edge_skips += 1; return
             self.slips.append(liq.slippage_pct); self.depths.append(liq.depth_notional * fx)
             if len(self.slips) > 2000: self.slips = self.slips[-2000:]; self.depths = self.depths[-2000:]
-        target = leader_inr_mid / (1 + basis / 100.0) if cfg.basis_filter else leader_inr_mid
-        self.pending[coin] = {"direction": direction, "notional_inr": notional, "target": target,
+        target = leader_usdt_mid / (1 + basis / 100.0) if cfg.basis_filter else leader_usdt_mid
+        self.pending[coin] = {"direction": direction, "notional_usdt": notional, "target": target,
                               "signal_ts": now, "fire_at": now + self.latency_s, "adj_pct": adj}
 
     def _settle(self, pos, coin, now, lagg, feed, fx, cfg, reason, leader_fresh) -> None:
         exit_side = "SHORT" if pos["direction"] == "LONG" else "LONG"
-        liq = self._liq(feed, coin, exit_side, pos["notional_inr"], fx, cfg, leader_fresh)
+        liq = self._liq(feed, coin, exit_side, pos["notional_usdt"], fx, cfg, leader_fresh)
         price = (liq.vwap * fx) if (liq and liq.vwap > 0) else (lagg.bid if pos["direction"] == "LONG" else lagg.ask)
         gross = (price - pos["entry"]) * pos["contracts"] if pos["direction"] == "LONG" else (pos["entry"] - price) * pos["contracts"]
-        fees = pos["notional_inr"] * 2 * self.fee_pct / 100.0
+        fees = pos["notional_usdt"] * 2 * self.fee_pct / 100.0
         net = gross - fees
         self.trades += 1; self.wins += int(net >= 0)
         self.gross += gross; self.fees += fees; self.net += net
@@ -232,8 +232,8 @@ class ShadowExchange:
             "runtime_s": round(runtime_s), "signals": self.signals, "trades": self.trades,
             "open": len(self.open), "wins": self.wins,
             "win_rate": round(self.wins / self.trades * 100, 1) if self.trades else None,
-            "gross_inr": round(self.gross, 2), "fees_inr": round(self.fees, 2), "net_inr": round(self.net, 2),
-            "net_inr_per_hour": round(self.net / hours, 2), "trades_per_hour": round(self.trades / hours, 1),
+            "gross_usdt": round(self.gross, 2), "fees_usdt": round(self.fees, 2), "net_usdt": round(self.net, 2),
+            "net_usdt_per_hour": round(self.net / hours, 2), "trades_per_hour": round(self.trades / hours, 1),
             "avg_hold_s": round(sum(self.holds) / len(self.holds), 1) if self.holds else None,
             "lag_window_s": {"median": _median(self.lag_windows), "p75": _pct(self.lag_windows, 0.75), "n": len(self.lag_windows)},
             "catch_up_s": {"median": _median(self.target_holds), "p75": _pct(self.target_holds, 0.75), "n": len(self.target_holds)},
@@ -243,7 +243,7 @@ class ShadowExchange:
                                "p90": _pct(self.response_lags, 0.9), "n": len(self.response_lags),
                                "timeouts_pct": round(sum(1 for x in self.response_lags if x >= 10) / len(self.response_lags) * 100, 1) if self.response_lags else None},
             "slippage_pct": {"median": _median(self.slips), "p90": _pct(self.slips, 0.9)},
-            "depth_10bps_inr": {"median": _median(self.depths)},
+            "depth_10bps_usdt": {"median": _median(self.depths)},
             "slippage_ladder": {str(n): {"median": _median(xs), "p90": _pct(xs, 0.9),
                                          "unfillable_pct": round(sum(1 for x in xs if x >= 100) / len(xs) * 100, 1) if xs else None}
                                 for n, xs in self.ladder.items()},
@@ -274,7 +274,6 @@ class ShadowRunner:
             "coindcx": ShadowExchange("coindcx", cfg.coindcx_taker_fee_pct, cfg.coindcx_exec_latency_s, stop_fn),
         }
         self.started_at = time.time()
-        self.fx0: Optional[float] = None   # pinned once the FX service has a real quote
 
     def _other_name(self) -> str:
         return "coindcx" if self.engine.cfg.laggard_exchange == "coinswitch" else "coinswitch"
@@ -293,22 +292,20 @@ class ShadowRunner:
         f = self.other_feed
         if f is None or f.coins != coins or getattr(f, "_exchange", "") != name:
             if f: f.stop()
-            f = make_laggard_feed(name, coins, lambda: self.engine.fx.rate, url=self.engine.cfg.coinswitch_ws_url)
+            f = make_laggard_feed(name, coins, url=self.engine.cfg.coinswitch_ws_url)
             f._exchange = name
             self.other_feed = f
             await f.start()
 
     async def _loop(self) -> None:
-        from bot_engine import TopOfBook
         try:
             while True:
                 try:
                     if self.engine.running and self.engine.live_feed:
                         await self._ensure_other_feed()
-                        now = time.time(); fx_live = max(self.engine.fx.rate, 1e-6); cfg = self.engine.cfg
-                        if self.fx0 is None and getattr(self.engine.fx, "last_update_ts", 0): self.fx0 = fx_live
-                        fx = self.fx0 or fx_live   # fixed booking rate: FX drift must not fake PnL / stops
-                        slot = self.engine.allocated_per_slot_inr() * max(1, int(cfg.leverage))
+                        now = time.time(); cfg = self.engine.cfg
+                        fx = 1.0   # both leader and laggard are native USDT - no conversion
+                        slot = self.engine.allocated_per_slot_usdt() * max(1, int(cfg.leverage))
                         for name, feed in self.feeds().items():
                             if not feed: continue
                             sim = self.sims[name]
@@ -316,8 +313,7 @@ class ShadowRunner:
                                 leader = self.engine.live_feed.book.get(coin)
                                 lagg = feed.fresh(coin, cfg.laggard_stale_after_s)
                                 if leader and lagg:
-                                    lagg_fixed = TopOfBook(coin, lagg.bid / fx_live * fx, lagg.ask / fx_live * fx, lagg.ts_ms)
-                                    sim.step(coin, now, leader, lagg_fixed, feed, fx, cfg, slot)
+                                    sim.step(coin, now, leader, lagg, feed, fx, cfg, slot)
                 except Exception as e:  # keep the comparison alive on data hiccups
                     logger.warning(f"shadow step error: {e}")
                 await asyncio.sleep(0.1)
@@ -330,7 +326,7 @@ class ShadowRunner:
         ex = {n: (self.sims[n].metrics(runtime, feeds[n]) if feeds.get(n) else None) for n in EXCHANGES}
         return {"runtime_s": round(runtime), "primary": self.engine.cfg.laggard_exchange, "exchanges": ex,
                 "verdict": verdict(ex), "assumptions": {
-                    "slot_notional_inr": round(self.engine.allocated_per_slot_inr() * max(1, int(self.engine.cfg.leverage)), 2),
+                    "slot_notional_usdt": round(self.engine.allocated_per_slot_usdt() * max(1, int(self.engine.cfg.leverage)), 2),
                     "max_slippage_pct": self.engine.cfg.max_slippage_pct, "phantom_frozen_s": self.engine.cfg.phantom_frozen_s,
                     "timeout_s": self.engine.cfg.timeout_seconds, "basis_filter": self.engine.cfg.basis_filter}}
 
@@ -364,20 +360,20 @@ def verdict(ex: Dict[str, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
     sl_cs, sl_dx = g(cs, "slippage_pct", "median"), g(dx, "slippage_pct", "median")
     if sl_cs is not None and sl_dx is not None:
         lines.append(f"Entry slippage at slot size (median): CoinSwitch {sl_cs:.3f}% vs CoinDCX {sl_dx:.3f}% → {'CoinDCX tighter' if sl_dx < sl_cs else 'CoinSwitch tighter'}.")
-    dp_cs, dp_dx = g(cs, "depth_10bps_inr", "median"), g(dx, "depth_10bps_inr", "median")
+    dp_cs, dp_dx = g(cs, "depth_10bps_usdt", "median"), g(dx, "depth_10bps_usdt", "median")
     if dp_cs is not None and dp_dx is not None:
-        lines.append(f"Depth within 10 bps (median): CoinSwitch ₹{dp_cs:,.0f} vs CoinDCX ₹{dp_dx:,.0f}.")
+        lines.append(f"Depth within 10 bps (median): CoinSwitch ${dp_cs:,.0f} vs CoinDCX ${dp_dx:,.0f}.")
     lad = []
     for n in ("10000", "100000", "1000000"):
         a, b = g(cs, "slippage_ladder", n, "median"), g(dx, "slippage_ladder", n, "median")
         if a is not None and b is not None:
-            lad.append(f"₹{int(n)/1e5:g}L: {a:.3f}% / {b:.3f}%" if int(n) >= 1e5 else f"₹{int(n)/1e3:g}k: {a:.3f}% / {b:.3f}%")
+            lad.append(f"${int(n)/1e6:g}M: {a:.3f}% / {b:.3f}%" if int(n) >= 1e6 else f"${int(n)/1e3:g}k: {a:.3f}% / {b:.3f}%")
     if lad: lines.append("Slippage ladder (CoinSwitch / CoinDCX, worst side, median): " + " · ".join(lad) + ".")
     ph_cs, ph_dx = g(cs, "skips", "phantom"), g(dx, "skips", "phantom")
     lines.append(f"Phantom/thin skips: CoinSwitch {ph_cs}+{g(cs,'skips','thin')} vs CoinDCX {ph_dx}+{g(dx,'skips','thin')} of {cs['signals']} / {dx['signals']} signals.")
     lines.append(f"Fees+latency: CoinSwitch {cs['fee_pct_per_side']}%/side, {cs['exec_latency_s']}s exec vs CoinDCX {dx['fee_pct_per_side']}%/side, {dx['exec_latency_s']}s exec.")
-    n_cs, n_dx = cs["net_inr_per_hour"], dx["net_inr_per_hour"]
-    lines.append(f"Net ₹/hour after fees+slippage: CoinSwitch {n_cs:+.2f} ({cs['trades']} trades, win {cs['win_rate']}%) vs CoinDCX {n_dx:+.2f} ({dx['trades']} trades, win {dx['win_rate']}%).")
+    n_cs, n_dx = cs["net_usdt_per_hour"], dx["net_usdt_per_hour"]
+    lines.append(f"Net $/hour after fees+slippage: CoinSwitch {n_cs:+.2f} ({cs['trades']} trades, win {cs['win_rate']}%) vs CoinDCX {n_dx:+.2f} ({dx['trades']} trades, win {dx['win_rate']}%).")
     total = cs["trades"] + dx["trades"]
     winner = None if total == 0 else ("coinswitch" if n_cs > n_dx else "coindcx")
     conf = "none" if total == 0 else "low" if total < 20 or cs["runtime_s"] < 1800 else "medium" if total < 60 else "high"

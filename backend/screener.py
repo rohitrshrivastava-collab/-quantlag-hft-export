@@ -109,10 +109,10 @@ def lag_activity_from_ticks(path: Path, coins: set, max_lines: int = 800_000) ->
             except ValueError: continue
             c = r["c"]
             if c not in coins: continue
-            lb, la, cb, ca, fx = r["lb"], r["la"], r["cb"], r["ca"], r["fx"]
+            lb, la, cb, ca = r["lb"], r["la"], r["cb"], r["ca"]
             if not (lb and la and cb and ca): continue
             lm = (cb + ca) / 2
-            vals.setdefault(c, []).append(((lb + la) / 2 * fx - lm) / lm * 1e4)
+            vals.setdefault(c, []).append(((lb + la) / 2 - lm) / lm * 1e4)
     out = {}
     for c, v in vals.items():
         if len(v) < 30: continue

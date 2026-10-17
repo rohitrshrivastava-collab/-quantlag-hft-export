@@ -24,10 +24,10 @@ class TickRecorder:
         self.last_flush_ts = 0.0
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def record(self, coin: str, lb: float, la: float, cb: float, ca: float, fx: float, ts: Optional[float] = None) -> None:
+    def record(self, coin: str, lb: float, la: float, cb: float, ca: float, ts: Optional[float] = None) -> None:
         if not self.enabled: return
         t = ts or time.time()
-        self._buf.append(json.dumps({"t": round(t, 3), "c": coin, "lb": lb, "la": la, "cb": cb, "ca": ca, "fx": round(fx, 4)},
+        self._buf.append(json.dumps({"t": round(t, 3), "c": coin, "lb": lb, "la": la, "cb": cb, "ca": ca},
                                     separators=(",", ":")))
 
     def _path_for(self, t: float) -> Path:
@@ -95,7 +95,7 @@ def iter_ticks(path: Path, max_lines: int = 5_000_000):
 
 
 def replay_session(path: Path, *, coins: List[str], hurdle_pct: float, basis_filter: bool, basis_window_s: int,
-                   leverage: int, num_slots: int, equity_inr: float, timeout_seconds: int, stop_loss_pct: float,
+                   leverage: int, num_slots: int, equity_usdt: float, timeout_seconds: int, stop_loss_pct: float,
                    fee_round_trip_pct: float, start_ts: Optional[float] = None, end_ts: Optional[float] = None,
                    max_lines: int = 5_000_000, rows=None) -> Dict[str, Any]:
     """Offline pass of the live signal rules over one recorded day. Fills at top-of-book like PAPER mode.
@@ -103,7 +103,7 @@ def replay_session(path: Path, *, coins: List[str], hurdle_pct: float, basis_fil
     basis_hist: Dict[str, List[tuple]] = {c: [] for c in coins}
     open_pos: Dict[str, Dict[str, Any]] = {}
     trades: List[Dict[str, Any]] = []
-    equity = equity_inr
+    equity = equity_usdt
     curve: List[Dict[str, float]] = []
     last_curve_t = 0.0
     n = 0
@@ -138,10 +138,10 @@ def replay_session(path: Path, *, coins: List[str], hurdle_pct: float, basis_fil
             if start_ts and t < start_ts: continue
             if end_ts and t > end_ts: break
             first_t = first_t or t; last_t = t
-            lb, la, cb, ca, fx = r["lb"], r["la"], r["cb"], r["ca"], r["fx"]
+            lb, la, cb, ca = r["lb"], r["la"], r["cb"], r["ca"]
             if not (lb and la and cb and ca): continue
-            lagg_mid = (cb + ca) / 2; leader_inr_mid = (lb + la) / 2 * fx
-            gross_pct = (leader_inr_mid - lagg_mid) / lagg_mid * 100.0
+            lagg_mid = (cb + ca) / 2; leader_mid = (lb + la) / 2
+            gross_pct = (leader_mid - lagg_mid) / lagg_mid * 100.0
             basis = basis_for(coin, t, gross_pct)
             adj = gross_pct - basis if basis_filter else gross_pct
             p = open_pos.get(coin)
@@ -158,7 +158,7 @@ def replay_session(path: Path, *, coins: List[str], hurdle_pct: float, basis_fil
                 if margin < 50: continue
                 entry = ca if d == "LONG" else cb
                 notional = margin * lev
-                target_ref = leader_inr_mid / (1 + basis / 100.0) if basis_filter else leader_inr_mid
+                target_ref = leader_mid / (1 + basis / 100.0) if basis_filter else leader_mid
                 stop = entry * (1 - stop_loss_pct / 100) if d == "LONG" else entry * (1 + stop_loss_pct / 100)
                 open_pos[coin] = {"dir": d, "t": t, "entry": entry, "contracts": notional / entry, "margin": margin,
                                   "notional": notional, "target": target_ref, "stop": stop, "basis": basis}
@@ -176,11 +176,11 @@ def replay_session(path: Path, *, coins: List[str], hurdle_pct: float, basis_fil
                          "avg_hold_s": round(sum(x["hold_s"] for x in ts_) / len(ts_), 1)})
     return {"file": path.name, "lines": n, "span_s": round((last_t - first_t), 1) if first_t and last_t else 0,
             "params": {"hurdle_pct": hurdle_pct, "basis_filter": basis_filter, "basis_window_s": basis_window_s, "leverage": lev,
-                       "num_slots": num_slots, "equity_inr": equity_inr, "timeout_seconds": timeout_seconds,
+                       "num_slots": num_slots, "equity_usdt": equity_usdt, "timeout_seconds": timeout_seconds,
                        "stop_loss_pct": stop_loss_pct, "fee_round_trip_pct": fee_round_trip_pct},
             "trades": len(trades), "wins": wins, "win_rate": round(wins / len(trades) * 100, 1) if trades else 0.0,
-            "net_pnl_inr": round(equity - equity_inr, 4), "final_equity_inr": round(equity, 4),
-            "return_pct": round((equity / equity_inr - 1) * 100, 3) if equity_inr else 0.0,
+            "net_pnl_usdt": round(equity - equity_usdt, 4), "final_equity_usdt": round(equity, 4),
+            "return_pct": round((equity / equity_usdt - 1) * 100, 3) if equity_usdt else 0.0,
             "max_drawdown_pct": _max_dd(curve), "per_coin": sorted(per_coin, key=lambda x: x["net"], reverse=True),
             "equity_curve": curve[::max(1, len(curve) // 400)], "last_trades": trades[-50:]}
 
@@ -202,7 +202,7 @@ def replay_sweep(path: Path, *, hurdles: List[float], basis_windows: List[int], 
         for w in basis_windows:
             r = replay_session(path, rows=rows, hurdle_pct=h, basis_window_s=w, **params)
             grid.append({"hurdle_pct": h, "basis_window_s": w, "trades": r["trades"], "win_rate": r["win_rate"],
-                         "net_pnl_inr": r["net_pnl_inr"], "return_pct": r["return_pct"], "max_drawdown_pct": r["max_drawdown_pct"]})
-    best = max(grid, key=lambda g: (g["net_pnl_inr"], -g["max_drawdown_pct"])) if grid else None
+                         "net_pnl_usdt": r["net_pnl_usdt"], "return_pct": r["return_pct"], "max_drawdown_pct": r["max_drawdown_pct"]})
+    best = max(grid, key=lambda g: (g["net_pnl_usdt"], -g["max_drawdown_pct"])) if grid else None
     return {"file": path.name, "lines": len(rows), "hurdles": hurdles, "basis_windows": basis_windows,
             "params": {k: v for k, v in params.items() if k != "coins"}, "grid": grid, "best": best}

@@ -52,8 +52,7 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 
 def evaluate(result: Dict[str, Any], *, slippage_pct: float, extra_pct: float,
-             fees_pct: Optional[Dict[str, float]] = None, slot_inr: float = 400.0,
-             fx: float = 85.0) -> Dict[str, Any]:
+             fees_pct: Optional[Dict[str, float]] = None, slot_usdt: float = 5.0) -> Dict[str, Any]:
     ex = result.get("exchanges", {})
     fees_pct = fees_pct or {}
     rows: List[Dict[str, Any]] = []
@@ -74,7 +73,7 @@ def evaluate(result: Dict[str, Any], *, slippage_pct: float, extra_pct: float,
         edge_bps_per_tick = opp_share * excess_bps           # expected net bps captured per laggard tick
         ticks_per_s = r["ws_msgs_per_s"]
         opp_per_min = opp_share * ticks_per_s * 60.0
-        net_edge_inr_per_opp = slot_inr * excess_bps / 1e4
+        net_edge_usdt_per_opp = slot_usdt * excess_bps / 1e4
         reasons: List[str] = []
         if not gate_feed: reasons.append("feed gate failed (gap/reconnect/p99)")
         if not gate_exec: reasons.append("execution RTT budget failed")
@@ -82,7 +81,6 @@ def evaluate(result: Dict[str, Any], *, slippage_pct: float, extra_pct: float,
         slip_bps = slippage_pct * 100.0
         if spread > 2 * slip_bps: reasons.append(f"spread {spread:.1f} bps > 2× slippage buffer")
         depth = r["depth_10bps_usdt_median"] or 0.0
-        slot_usdt = slot_inr / max(fx, 1e-6)
         if depth < 50 * slot_usdt: reasons.append("thin book (<50× slot within 10 bps)")
         rows.append({
             "exchange": name, "pair": meta["pair"], "label": meta["label"],
@@ -92,8 +90,8 @@ def evaluate(result: Dict[str, Any], *, slippage_pct: float, extra_pct: float,
             "gate_feed": gate_feed, "gate_exec": gate_exec, "qualified": gate_feed and gate_exec,
             "opportunity_share": round(opp_share, 4), "opportunities_per_min": round(opp_per_min, 2),
             "mean_excess_bps": round(excess_bps, 2), "edge_bps_per_tick": round(edge_bps_per_tick, 4),
-            "net_edge_inr_per_opportunity": round(net_edge_inr_per_opp, 3),
-            "expected_inr_per_hour": round(opp_per_min * 60 * net_edge_inr_per_opp, 2),
+            "net_edge_usdt_per_opportunity": round(net_edge_usdt_per_opp, 3),
+            "expected_usdt_per_hour": round(opp_per_min * 60 * net_edge_usdt_per_opp, 2),
             "spread_bps": r["spread_bps_median"], "depth_10bps_usdt": r["depth_10bps_usdt_median"],
             "flags": reasons, "order_rate_limit": meta["order_rate_limit"], "book_stream": meta["book_stream"],
         })
@@ -123,6 +121,6 @@ def evaluate(result: Dict[str, Any], *, slippage_pct: float, extra_pct: float,
         "margin": None if margin is None else round(margin, 1), "confidence": confidence,
         "any_qualified": any(x["qualified"] for x in rows),
         "rows": sorted(rows, key=lambda x: x["score"]["total"], reverse=True),
-        "inputs": {"slippage_pct": slippage_pct, "extra_pct": extra_pct, "slot_inr": slot_inr, "fx": fx,
+        "inputs": {"slippage_pct": slippage_pct, "extra_pct": extra_pct, "slot_usdt": slot_usdt,
                    "duration_s": result.get("duration_s"), "symbols": result.get("symbols")},
     }

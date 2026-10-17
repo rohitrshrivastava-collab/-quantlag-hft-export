@@ -1,5 +1,5 @@
 """Order-book liquidity assessment: walk-the-book VWAP, slippage, resting depth, frozen-book (phantom) detection.
-Units are whatever the levels are quoted in (feeds store USDT); callers convert to INR."""
+Units are native USDT throughout — feeds store USDT and callers pass USDT notional directly, no conversion."""
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict

@@ -65,7 +65,7 @@ SEED_PRICES_USDT = {
 @dataclass
 class BotConfig:
     paper_trading: bool = True
-    starting_capital_inr: float = 4000.0
+    starting_capital_usdt: float = 50.0
     num_slots: int = 10
     coins: List[str] = field(default_factory=lambda: list(DEFAULT_COINS))
     entry_taker_fee_pct: float = 0.05      # % per side
@@ -74,7 +74,6 @@ class BotConfig:
     hurdle_extra_pct: float = 0.02         # additional edge required beyond fees+slip
     timeout_seconds: int = 45              # 30-60s guard
     stop_loss_pct: float = 0.35            # volatility hard stop
-    fx_usdt_inr: float = 84.5              # falls back if REST fails
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     binance_ws_url: str = "wss://fstream.binance.com/stream"
@@ -99,7 +98,7 @@ class BotConfig:
     max_slippage_pct: float = 0.05         # max round-trip slippage (entry+exit) we accept
     phantom_frozen_s: float = 3.0          # laggard book unchanged this long while Binance ticks → PHANTOM
     depth_bps: float = 10.0                # resting-depth window reported per coin
-    min_order_inr: float = 100.0           # shrink floor: skip if the book can't absorb at least this
+    min_order_usdt: float = 100.0           # shrink floor: skip if the book can't absorb at least this
     max_entry_frozen_s: float = 1.0        # fresh-book filter: laggard top-5 must have changed within this many s
     spike_persist_ms: int = 300            # Binance dislocation must stay above the hurdle this long before we fire (0 = immediate)
     scan_interval_s: float = 0.1
@@ -135,14 +134,13 @@ class BotConfig:
             return os.environ.get(k, str(d)).strip().lower() in ("1","true","yes","on")
         return cls(
             paper_trading=_b("PAPER_TRADING", True),
-            starting_capital_inr=_f("STARTING_CAPITAL_INR", 4000.0),
+            starting_capital_usdt=_f("STARTING_CAPITAL_USDT", 50.0),
             entry_taker_fee_pct=_f("ENTRY_FEE_PCT", 0.05),
             exit_taker_fee_pct=_f("EXIT_FEE_PCT", 0.05),
             slippage_buffer_pct=_f("SLIPPAGE_BUFFER_PCT", 0.03),
             hurdle_extra_pct=_f("HURDLE_EXTRA_PCT", 0.02),
             timeout_seconds=_i("TIMEOUT_SECONDS", 45),
             stop_loss_pct=_f("STOP_LOSS_PCT", 0.35),
-            fx_usdt_inr=_f("FX_USDT_INR", 84.5),
             telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
             coinswitch_ws_url=os.environ.get("COINSWITCH_WS_URL", ""),
@@ -165,7 +163,7 @@ class BotConfig:
             max_slippage_pct=_f("MAX_SLIPPAGE_PCT", 0.05),
             phantom_frozen_s=_f("PHANTOM_FROZEN_S", 3.0),
             depth_bps=_f("DEPTH_BPS", 10.0),
-            min_order_inr=_f("MIN_ORDER_INR", 100.0),
+            min_order_usdt=_f("MIN_ORDER_USDT", 100.0),
             max_entry_frozen_s=_f("MAX_ENTRY_FROZEN_S", 1.0),
             spike_persist_ms=_i("SPIKE_PERSIST_MS", 300),
             scan_interval_s=_f("SCAN_INTERVAL_S", 0.1),
@@ -209,21 +207,21 @@ class Position:
     id: str
     coin: str
     direction: str                 # "LONG" | "SHORT"
-    size_inr: float
+    size_usdt: float
     contracts: float
-    entry_price_inr: float         # CoinSwitch entry
+    entry_price_usdt: float         # CoinSwitch entry
     binance_ref_usdt: float        # leader price at entry
-    target_price_inr: float        # catch-up target
-    stop_price_inr: float
+    target_price_usdt: float        # catch-up target
+    stop_price_usdt: float
     opened_at: float               # epoch seconds
     timeout_at: float
     mode: str                      # "PAPER" | "LIVE"
     status: str = "OPEN"           # OPEN | CLOSED
-    exit_price_inr: Optional[float] = None
+    exit_price_usdt: Optional[float] = None
     closed_at: Optional[float] = None
-    gross_pnl_inr: float = 0.0
-    fees_inr: float = 0.0
-    net_pnl_inr: float = 0.0
+    gross_pnl_usdt: float = 0.0
+    fees_usdt: float = 0.0
+    net_pnl_usdt: float = 0.0
     close_reason: Optional[str] = None
     entry_order_id: Optional[str] = None
     exit_order_id: Optional[str] = None
@@ -231,12 +229,11 @@ class Position:
     create_ms: Optional[float] = None         # LIVE: REST order-create round trip
     fill_confirm_ms: Optional[float] = None   # LIVE: create ack → terminal fill (WS push or REST poll)
     leverage: int = 1
-    notional_inr: float = 0.0
+    notional_usdt: float = 0.0
     basis_pct: float = 0.0
     liq_state: str = ""
     liq_slippage_pct: float = 0.0      # expected one-side entry slippage at the traded notional
-    requested_notional_inr: float = 0.0  # pre-shrink slot notional
-    entry_fx: float = 0.0              # USDT/INR used to book the entry; exits are marked at the same rate
+    requested_notional_usdt: float = 0.0  # pre-shrink slot notional
     stop_pct: float = 0.0              # hard stop applied at entry (%)
     stop_basis: str = ""               # dynamic | fixed
 
@@ -331,21 +328,12 @@ class MarketSimulator:
     The laggard trails the leader by a variable lag (100–1500 ms) plus noise
     so the SignalEngine sees real hurdle-gate opportunities.
     """
-    def __init__(self, coins: List[str], fx_provider=None, fx_ref: float = 84.5) -> None:
+    def __init__(self, coins: List[str]) -> None:
         self.coins = coins
-        self._fx_provider = fx_provider     # callable returning current usdt/inr
-        self.fx_ref = fx_ref                # fallback
         self.binance: Dict[str, TopOfBook] = {}
         self.coinswitch: Dict[str, TopOfBook] = {}
         self._leader_series: Dict[str, List[float]] = {c: [SEED_PRICES_USDT[c]] for c in coins}
         self._running = False
-
-    def _fx(self) -> float:
-        try:
-            v = self._fx_provider() if self._fx_provider else self.fx_ref
-            return float(v) if v and 40 < float(v) < 200 else self.fx_ref
-        except Exception:
-            return self.fx_ref
 
     async def start(self) -> None:
         self._running = True
@@ -373,12 +361,11 @@ class MarketSimulator:
                 self.binance[c] = TopOfBook(c, new_price - spread/2, new_price + spread/2, now_ms)
 
                 # laggard mirrors leader with a delay of 3–10 ticks + noise,
-                # emitted in INR-scale (× fx_ref) to match real CoinSwitch PRO quotes.
+                # natively in USDT to match real CoinSwitch/CoinDCX quotes.
                 lag_ticks = random.randint(3, 10)
-                lag_usdt = series[-min(len(series), lag_ticks)]
-                lag_inr = lag_usdt * self._fx() * (1 + random.gauss(0, 0.0006))
-                lag_spread = lag_inr * 0.0006
-                self.coinswitch[c] = TopOfBook(c, lag_inr - lag_spread/2, lag_inr + lag_spread/2, now_ms)
+                lag_usdt = series[-min(len(series), lag_ticks)] * (1 + random.gauss(0, 0.0006))
+                lag_spread = lag_usdt * 0.0006
+                self.coinswitch[c] = TopOfBook(c, lag_usdt - lag_spread/2, lag_usdt + lag_spread/2, now_ms)
             await asyncio.sleep(0.25)
 
     def leader(self, coin: str) -> Optional[TopOfBook]: return self.binance.get(coin)
@@ -465,11 +452,10 @@ class LiveCoinSwitchBookFeed:
       server "2"             -> we reply "3"                        (ping/pong)
       server "42/exchange_2,[FETCH_ORDER_BOOK_CS_PRO,{...}]" -> full book snapshot
     Every push is a FULL snapshot; top-of-book is taken from bids[0]/asks[0].
-    Quotes are stored INR-scaled (× fx) to match the engine's laggard convention.
+    Quotes are native USDT (the exchange's own {COIN}USDT contract price).
     """
-    def __init__(self, coins: List[str], fx_provider, url: str = "") -> None:
+    def __init__(self, coins: List[str], url: str = "") -> None:
         self.coins = coins
-        self._fx = fx_provider
         self.url = url or COINSWITCH_WS_DEFAULT_URL
         self.book: Dict[str, TopOfBook] = {}
         self.depth: Dict[str, Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]] = {}  # coin -> (bids, asks) top-20 in USDT
@@ -535,9 +521,8 @@ class LiveCoinSwitchBookFeed:
             return
         if bid <= 0 or ask <= 0: return
         now = time.time()
-        fx = float(self._fx() or 0) or 1.0
         ts_ms = int(d.get("timestamp") or now * 1000)
-        self.book[coin] = TopOfBook(coin=coin, bid=bid * fx, ask=ask * fx, ts_ms=ts_ms)
+        self.book[coin] = TopOfBook(coin=coin, bid=bid, ask=ask, ts_ms=ts_ms)
         self.tick_recv_ts[coin] = now
         self._store_depth(coin, bids, asks, now)
         lat = max(0.0, now * 1000.0 - ts_ms)
@@ -623,8 +608,8 @@ class LiveCoinDCXBookFeed(LiveCoinSwitchBookFeed):
     """CoinDCX Futures public book stream (Socket.IO v2 / EIO=3): depth-snapshot + depth-update deltas."""
     DEFAULT_URL = "wss://stream.coindcx.com/socket.io/?EIO=3&transport=websocket"
 
-    def __init__(self, coins: List[str], fx_provider, url: str = "") -> None:
-        super().__init__(coins, fx_provider, url or self.DEFAULT_URL)
+    def __init__(self, coins: List[str], url: str = "") -> None:
+        super().__init__(coins, url or self.DEFAULT_URL)
         self._books: Dict[str, Dict[str, Dict[float, float]]] = {}
 
     def _apply(self, coin: str, side: str, levels: Dict[str, str], snapshot: bool) -> None:
@@ -685,82 +670,9 @@ class LiveCoinDCXBookFeed(LiveCoinSwitchBookFeed):
                 if self._running: self.reconnects += 1
 
 
-def make_laggard_feed(exchange: str, coins: List[str], fx_provider, url: str = "") -> LiveCoinSwitchBookFeed:
-    if exchange == "coindcx": return LiveCoinDCXBookFeed(coins, fx_provider)
-    return LiveCoinSwitchBookFeed(coins, fx_provider, url=url)
-
-
-class FXRateService:
-    """USDT/INR quote = median of fresh sources (CoinGecko, CoinDCX spot USDTINR, Binance P2P top-10 median).
-    Falls back to the last good blend, then to the config value.
-    """
-    FRESH_S = 180
-
-    def __init__(self, fallback: float) -> None:
-        self.rate = fallback
-        self._fallback = fallback
-        self._running = False
-        self.sources: Dict[str, Dict[str, Any]] = {}
-        self.last_update_ts = 0.0
-        self._task: Optional[asyncio.Task] = None
-
-    async def start(self) -> None:
-        self._running = True
-        self._task = asyncio.create_task(self._loop())
-
-    def stop(self) -> None:
-        self._running = False
-        if self._task: self._task.cancel()
-
-    def status(self) -> Dict[str, Any]:
-        now = time.time()
-        return {"rate": round(self.rate, 4), "last_update_age_s": round(now - self.last_update_ts, 1) if self.last_update_ts else None,
-                "sources": {k: {"rate": v.get("rate"), "age_s": round(now - v["ts"], 1) if v.get("ts") else None,
-                                "error": v.get("error", "")} for k, v in self.sources.items()},
-                "used": [k for k, v in self.sources.items() if v.get("rate") and now - v.get("ts", 0) < self.FRESH_S]}
-
-    async def _coingecko(self, s: aiohttp.ClientSession) -> float:
-        async with s.get("https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=inr") as r:
-            d = await r.json(content_type=None)
-            return float(d.get("tether", {}).get("inr", 0) or 0)
-
-    async def _coindcx(self, s: aiohttp.ClientSession) -> float:
-        async with s.get("https://api.coindcx.com/exchange/ticker") as r:
-            for x in await r.json(content_type=None):
-                if x.get("market") == "USDTINR":
-                    bid, ask = float(x.get("bid") or 0), float(x.get("ask") or 0)
-                    return (bid + ask) / 2 if bid and ask else float(x.get("last_price") or 0)
-        return 0.0
-
-    async def _binance_p2p(self, s: aiohttp.ClientSession) -> float:
-        body = {"asset": "USDT", "fiat": "INR", "tradeType": "BUY", "rows": 10, "page": 1, "payTypes": [], "publisherType": None}
-        async with s.post("https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search", json=body) as r:
-            d = (await r.json(content_type=None)).get("data") or []
-            px = sorted(float(a["adv"]["price"]) for a in d if a.get("adv", {}).get("price"))
-            return px[len(px) // 2] if px else 0.0
-
-    async def _loop(self) -> None:
-        fetchers = {"coingecko": self._coingecko, "coindcx": self._coindcx, "binance_p2p": self._binance_p2p}
-        try:
-            while self._running:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
-                    results = await asyncio.gather(*(f(s) for f in fetchers.values()), return_exceptions=True)
-                now = time.time()
-                for name, res in zip(fetchers, results):
-                    if isinstance(res, Exception) or not (60 < float(res or 0) < 130):
-                        self.sources.setdefault(name, {})["error"] = str(res)[:80] if isinstance(res, Exception) else "out of range/empty"
-                    else:
-                        self.sources[name] = {"rate": round(float(res), 4), "ts": now, "error": ""}
-                fresh = {k: v["rate"] for k, v in self.sources.items() if v.get("rate") and now - v.get("ts", 0) < self.FRESH_S}
-                if fresh:
-                    # CoinDCX's own USDT/INR is the rate the exchange actually margins at; others are sanity fallbacks.
-                    # Fixed preference avoids the ±1.5% jumps a plain median makes when one source drops out.
-                    vals = sorted(fresh.values())
-                    self.rate = fresh["coindcx"] if "coindcx" in fresh else (vals[len(vals) // 2] if len(vals) % 2 else (vals[len(vals)//2 - 1] + vals[len(vals)//2]) / 2)
-                    self.last_update_ts = now
-                await asyncio.sleep(30)
-        except asyncio.CancelledError:
-            pass
+def make_laggard_feed(exchange: str, coins: List[str], url: str = "") -> LiveCoinSwitchBookFeed:
+    if exchange == "coindcx": return LiveCoinDCXBookFeed(coins)
+    return LiveCoinSwitchBookFeed(coins, url=url)
 
 
 # ---------------------------------------------------------------------------
@@ -775,10 +687,9 @@ class LiveCoinSwitchTickerPoller:
     Cadence: ~0.5s between coin polls (~10 coins => ~5s per coin refresh).
     Well below the 20 req/60s limit on any private endpoint.
     """
-    def __init__(self, client, coins: List[str], fx_provider) -> None:
+    def __init__(self, client, coins: List[str]) -> None:
         self.client = client
         self.coins = coins
-        self._fx = fx_provider
         self.book: Dict[str, TopOfBook] = {}
         self._running = False
         self._task: Optional[asyncio.Task] = None
@@ -808,9 +719,8 @@ class LiveCoinSwitchTickerPoller:
                         bid = float(d.get("bid") or d.get("best_bid") or d.get("bid_price") or 0)
                         ask = float(d.get("ask") or d.get("best_ask") or d.get("ask_price") or 0)
                         if bid <= 0 or ask <= 0: continue
-                        fx = float(self._fx() or 0) or 1.0
                         self.book[c] = TopOfBook(
-                            coin=c, bid=bid*fx, ask=ask*fx,
+                            coin=c, bid=bid, ask=ask,
                             ts_ms=int(time.time()*1000),
                         )
                     except Exception as e:
@@ -900,7 +810,6 @@ class BotEngine:
         self.cfg = cfg
         self.data_dir = Path(cfg.data_dir) if cfg.data_dir else Path(__file__).resolve().parent.parent / "data"
         self.store = store or MemoryStore(persist_path=self.data_dir / "trades.json")
-        self.fx = FXRateService(cfg.fx_usdt_inr)
         self._build_feeds()
         self.telegram = TelegramReporter(cfg.telegram_bot_token, cfg.telegram_chat_id)
         self.coindcx: Optional[CoinDCXFuturesClient] = None
@@ -930,14 +839,13 @@ class BotEngine:
                     secret_key=cfg.coinswitch_api_secret,
                     base_url=cfg.coinswitch_base_url,
                 )
-                self.coinswitch_poller = LiveCoinSwitchTickerPoller(
-                    self.coinswitch, cfg.coins, lambda: self.fx.rate)
+                self.coinswitch_poller = LiveCoinSwitchTickerPoller(self.coinswitch, cfg.coins)
             except Exception as e:
                 logger.warning(f"CoinSwitch client init failed (keys malformed?): {e}")
         self.running = False
         self.started_at: Optional[float] = None
-        self.equity_inr = cfg.starting_capital_inr
-        self.realized_pnl_inr = 0.0
+        self.equity_usdt = cfg.starting_capital_usdt
+        self.realized_pnl_usdt = 0.0
         self.trade_count = 0
         self.win_count = 0
         self.loss_count = 0
@@ -983,11 +891,11 @@ class BotEngine:
 
     def _build_feeds(self) -> None:
         cfg = self.cfg
-        self.simulator = MarketSimulator(cfg.coins, fx_provider=lambda: self.fx.rate, fx_ref=cfg.fx_usdt_inr) if cfg.simulate else None
+        self.simulator = MarketSimulator(cfg.coins) if cfg.simulate else None
         self.live_feed = None if cfg.simulate else LiveBinanceFeed(cfg.coins)
         # Public laggard book WS — no keys needed, powers PAPER + LIVE when not simulating
         self.coinswitch_feed: Optional[LiveCoinSwitchBookFeed] = None if cfg.simulate else \
-            make_laggard_feed(cfg.laggard_exchange, cfg.coins, lambda: self.fx.rate, url=cfg.coinswitch_ws_url)
+            make_laggard_feed(cfg.laggard_exchange, cfg.coins, url=cfg.coinswitch_ws_url)
 
     def _reset_universe(self, coins: List[str]) -> None:
         self.cfg.coins = coins
@@ -1073,7 +981,6 @@ class BotEngine:
         if self.coinswitch_feed: await self.coinswitch_feed.start()
         if self.coindcx_user_stream and self.cfg.laggard_exchange == "coindcx": await self.coindcx_user_stream.start()
         if self.recorder.enabled: await self.recorder.start()
-        await self.fx.start()
         self._tasks = [
             asyncio.create_task(self._scan_loop()),
             asyncio.create_task(self._position_manager_loop()),
@@ -1104,7 +1011,6 @@ class BotEngine:
         if self.coinswitch_poller: self.coinswitch_poller.stop()
         self.recorder.stop()
         self.persist()
-        self.fx.stop()
         await self.store.log("INFO", "Bot stopped")
 
     # --- accessors -----------------------------------------------------------
@@ -1197,10 +1103,9 @@ class BotEngine:
                 "active": bool(self.coinswitch_poller and self.coinswitch_poller.running),
                 "rate_limiter": self.coinswitch.limiter_stats() if self.coinswitch else None,
             },
-            "fx": self.fx.status(),
             "exec": self.exec_health(),
             "liquidity_guard": {**self.liq_stats, "max_slippage_pct": self.cfg.max_slippage_pct,
-                                "phantom_frozen_s": self.cfg.phantom_frozen_s, "min_order_inr": self.cfg.min_order_inr,
+                                "phantom_frozen_s": self.cfg.phantom_frozen_s, "min_order_usdt": self.cfg.min_order_usdt,
                                 "max_entry_frozen_s": self.cfg.max_entry_frozen_s},
             "user_ws": None if not self.coindcx_user_stream else {
                 **self.coindcx_user_stream.status(),
@@ -1255,25 +1160,24 @@ class BotEngine:
         return c.entry_taker_fee_pct + c.exit_taker_fee_pct + max(c.slippage_buffer_pct, 2 * one_side_slippage_pct)
 
     # --- phantom-liquidity guard ---------------------------------------------------
-    def liquidity(self, coin: str, direction: str, notional_inr: float) -> Optional[Dict[str, Any]]:
-        """Walk the laggard book for `notional_inr` on the side we'd hit (LONG→asks, SHORT→bids)."""
+    def liquidity(self, coin: str, direction: str, notional_usdt: float) -> Optional[Dict[str, Any]]:
+        """Walk the laggard book for `notional_usdt` on the side we'd hit (LONG→asks, SHORT→bids)."""
         feed = self.coinswitch_feed
         if not feed or coin not in feed.depth: return None
         bids, asks = feed.depth[coin]
         levels = asks if direction == "LONG" else bids
-        fx = max(self.fx.rate, 1e-6)
         leader = self._leader(coin)
         leader_fresh = bool(leader) and (time.time() * 1000 - leader.ts_ms) < 2000
-        liq = assess(levels, notional_inr / fx, self.cfg.max_slippage_pct / 2, self.cfg.depth_bps,
+        liq = assess(levels, notional_usdt, self.cfg.max_slippage_pct / 2, self.cfg.depth_bps,
                      feed.frozen_s(coin), self.cfg.phantom_frozen_s if leader_fresh else float("inf"))
-        return {"state": liq.state, "vwap_inr": liq.vwap * fx, "slippage_pct": liq.slippage_pct,
-                "fillable_inr": round(liq.fillable * fx, 2), "depth_inr": round(liq.depth_notional * fx, 2),
-                "levels": liq.levels, "frozen_s": liq.frozen_s, "notional_inr": round(notional_inr, 2),
+        return {"state": liq.state, "vwap_usdt": liq.vwap, "slippage_pct": liq.slippage_pct,
+                "fillable_usdt": round(liq.fillable, 2), "depth_usdt": round(liq.depth_notional, 2),
+                "levels": liq.levels, "frozen_s": liq.frozen_s, "notional_usdt": round(notional_usdt, 2),
                 "dyn_hurdle_pct": round(self.dynamic_hurdle_pct(liq.slippage_pct), 4)}
 
-    def allocated_per_slot_inr(self) -> float:
+    def allocated_per_slot_usdt(self) -> float:
         n = max(1, self.cfg.num_slots)
-        return self.equity_inr / n
+        return self.equity_usdt / n
 
     # --- heatmap ---------------------------------------------------------------
     HEAT_WINDOW_S = 60
@@ -1337,21 +1241,19 @@ class BotEngine:
     async def _scan_coin(self, coin: str) -> None:
         leader = self._leader(coin); lagg = self._laggard(coin)
         if not leader or not lagg: return
-        fx = max(self.fx.rate, 1e-6)
-        # convert leader USDT mid → INR reference for like-with-like comparison
-        leader_inr_mid = leader.mid * fx
+        # leader (Binance) and laggard (CoinDCX/CoinSwitch) are both native USDT - direct comparison
         # gross divergence % vs laggard mid
-        gross_pct = (leader_inr_mid - lagg.mid) / lagg.mid * 100.0      # mid-vs-mid: used only for the basis estimate
+        gross_pct = (leader.mid - lagg.mid) / lagg.mid * 100.0      # mid-vs-mid: used only for the basis estimate
         now = time.time()
         slow = now - self._last_slow_ts.get(coin, 0.0) >= 0.4    # 2.5 Hz for recorder/sparkline/vol; scan itself runs faster
         if slow:
             self._last_slow_ts[coin] = now
-            self.recorder.record(coin, leader.bid, leader.ask, lagg.bid, lagg.ask, fx)
+            self.recorder.record(coin, leader.bid, leader.ask, lagg.bid, lagg.ask)
             self._record_mid(coin, now, lagg.mid)
         basis = self._update_basis(coin, gross_pct)
         # --- signal: Binance price vs the laggard's TOP OF BOOK (never LTP, never mid) ---
         # Bullish lag: Binance > best ask → LONG edge; Bearish lag: Binance < best bid → SHORT edge.
-        leader_ref = leader_inr_mid / (1 + basis / 100.0) if self.cfg.basis_filter else leader_inr_mid
+        leader_ref = leader.mid / (1 + basis / 100.0) if self.cfg.basis_filter else leader.mid
         long_edge = (leader_ref - lagg.ask) / lagg.ask * 100.0
         short_edge = (lagg.bid - leader_ref) / lagg.bid * 100.0
         adj_pct = long_edge if long_edge > 0 else (-short_edge if short_edge > 0 else 0.0)   # 0 = Binance inside the laggard spread
@@ -1364,7 +1266,7 @@ class BotEngine:
             if len(sp) > 60: self._sparkline[coin] = sp[-60:]
         self._record_heat(coin, adj_pct)
         lev = max(1, int(self.cfg.leverage))
-        liq = self.liquidity(coin, "LONG" if adj_pct >= 0 else "SHORT", self.allocated_per_slot_inr() * lev)
+        liq = self.liquidity(coin, "LONG" if adj_pct >= 0 else "SHORT", self.allocated_per_slot_usdt() * lev)
         if liq: self._last_liq[coin] = liq
 
         # skip if slot already occupied
@@ -1423,16 +1325,16 @@ class BotEngine:
         return vals[len(vals) // 2]
 
     # --- account controls ------------------------------------------------------
-    async def reset_account(self, equity_inr: float) -> None:
-        self.cfg.starting_capital_inr = equity_inr
-        self.equity_inr = equity_inr
-        self.realized_pnl_inr = 0.0
+    async def reset_account(self, equity_usdt: float) -> None:
+        self.cfg.starting_capital_usdt = equity_usdt
+        self.equity_usdt = equity_usdt
+        self.realized_pnl_usdt = 0.0
         self.trade_count = self.win_count = self.loss_count = 0
         self.total_hold_sec = self.total_exec_latency_ms = 0.0
         if hasattr(self.store, "equity_curve"): self.store.equity_curve = []
-        await self.store.push_equity(time.time(), equity_inr)
+        await self.store.push_equity(time.time(), equity_usdt)
         self.persist()
-        await self.store.log("INFO", f"Account reset: equity ₹{equity_inr:.2f}, stats zeroed (closed history kept)")
+        await self.store.log("INFO", f"Account reset: equity ${equity_usdt:.2f}, stats zeroed (closed history kept)")
 
     async def apply_leverage(self, leverage: int) -> List[str]:
         """Set leverage; in LIVE mode push to the laggard exchange for coins without open positions."""
@@ -1459,13 +1361,13 @@ class BotEngine:
         closed = getattr(self.store, "closed", [])
         for c in self.cfg.coins:
             ps = [p for p in closed if p.coin == c]
-            n = len(ps); wins = sum(1 for p in ps if p.net_pnl_inr >= 0)
+            n = len(ps); wins = sum(1 for p in ps if p.net_pnl_usdt >= 0)
             out.append({
                 "coin": c, "trades": n, "wins": wins, "losses": n - wins,
                 "win_rate": round(wins / n * 100, 1) if n else 0.0,
-                "net_pnl_inr": round(sum(p.net_pnl_inr for p in ps), 2),
-                "gross_pnl_inr": round(sum(p.gross_pnl_inr for p in ps), 2),
-                "fees_inr": round(sum(p.fees_inr for p in ps), 2),
+                "net_pnl_usdt": round(sum(p.net_pnl_usdt for p in ps), 2),
+                "gross_pnl_usdt": round(sum(p.gross_pnl_usdt for p in ps), 2),
+                "fees_usdt": round(sum(p.fees_usdt for p in ps), 2),
                 "avg_hold_sec": round(sum((p.closed_at or 0) - p.opened_at for p in ps) / n, 1) if n else 0.0,
                 "timeouts": sum(1 for p in ps if p.close_reason == "TIMEOUT"),
                 "target_hits": sum(1 for p in ps if p.close_reason == "TARGET_HIT"),
@@ -1479,17 +1381,17 @@ class BotEngine:
     # --- order lifecycle -----------------------------------------------------
     async def _open_position(self, coin: str, direction: str,
                              leader: TopOfBook, lagg: TopOfBook,
-                             leader_inr_mid: float, basis: float = 0.0, adj_pct: Optional[float] = None) -> None:
+                             leader_usdt_mid: float, basis: float = 0.0, adj_pct: Optional[float] = None) -> None:
         signal_ts = time.time()
-        size_inr = min(self.allocated_per_slot_inr(), max(0.0, self.equity_inr - sum(p.size_inr for p in await self.store.all_open())))
-        if size_inr < 50: return  # min lot guard
+        size_usdt = min(self.allocated_per_slot_usdt(), max(0.0, self.equity_usdt - sum(p.size_usdt for p in await self.store.all_open())))
+        if size_usdt < 50: return  # min lot guard
         lev = max(1, int(self.cfg.leverage))
-        notional_inr = size_inr * lev
-        requested_notional = notional_inr
+        notional_usdt = size_usdt * lev
+        requested_notional = notional_usdt
         # Entry price (paper) = worst top-of-book (taker)
         entry_price = lagg.ask if direction == "LONG" else lagg.bid
         # -------- phantom-liquidity guard: walk the book before committing --------
-        liq = self.liquidity(coin, direction, notional_inr)
+        liq = self.liquidity(coin, direction, notional_usdt)
         liq_state, liq_slip = "", 0.0
         if liq:
             if liq["state"] in ("PHANTOM", "NO_DEPTH"):
@@ -1502,31 +1404,31 @@ class BotEngine:
                 self._last_signal_state[coin] = "STALE_BOOK"
                 return
             # order-book share cap: never take more than max_book_share_pct of the liquidity near the top
-            share_cap = liq["depth_inr"] * self.cfg.max_book_share_pct / 100.0
-            allowed = min(liq["fillable_inr"], share_cap) if share_cap > 0 else liq["fillable_inr"]
-            if allowed < notional_inr:
-                if allowed < self.cfg.min_order_inr:
+            share_cap = liq["depth_usdt"] * self.cfg.max_book_share_pct / 100.0
+            allowed = min(liq["fillable_usdt"], share_cap) if share_cap > 0 else liq["fillable_usdt"]
+            if allowed < notional_usdt:
+                if allowed < self.cfg.min_order_usdt:
                     self.liq_stats["thin_skips"] += 1
                     self._last_signal_state[coin] = "THIN"
                     return
-                notional_inr = allowed
-                size_inr = notional_inr / lev
+                notional_usdt = allowed
+                size_usdt = notional_usdt / lev
                 self.liq_stats["shrunk"] += 1
-                liq = self.liquidity(coin, direction, notional_inr) or liq
+                liq = self.liquidity(coin, direction, notional_usdt) or liq
             liq_state, liq_slip = liq["state"], liq["slippage_pct"]
             if adj_pct is not None and abs(adj_pct) < self.dynamic_hurdle_pct(liq_slip):
                 self.liq_stats["edge_skips"] += 1
                 self._last_signal_state[coin] = "THIN"
                 return
-            if liq["vwap_inr"] > 0: entry_price = liq["vwap_inr"]
-        contracts = notional_inr / entry_price
-        target = leader_inr_mid
+            if liq["vwap_usdt"] > 0: entry_price = liq["vwap_usdt"]
+        contracts = notional_usdt / entry_price
+        target = leader_usdt_mid
         stop_pct, stop_basis = self.recommended_stop_pct(coin)
         stop = entry_price * (1 - stop_pct/100.0) if direction == "LONG" \
                else entry_price * (1 + stop_pct/100.0)
         latency_ms = 0.0
         entry_order_id: Optional[str] = None
-        entry_fee_inr = 0.0
+        entry_fee_usdt = 0.0
         create_ms: Optional[float] = None
         fill_confirm_ms: Optional[float] = None
 
@@ -1540,10 +1442,8 @@ class BotEngine:
                     await self.store.log("ERROR", f"[LIVE] {self.cfg.laggard_exchange.upper()} keys missing — no orders will be placed until API key/secret are set. Suppressing further per-coin warnings.")
                     self._live_missing_keys_warned = True
                 return
-            fx = max(self.fx.rate, 1e-6)
             if self._order_cooldown.get(coin, 0) > time.time(): return
-            usdt_notional = notional_inr / fx
-            qty = usdt_notional / max(leader.mid, 1e-9)
+            qty = notional_usdt / max(leader.mid, 1e-9)
             side = "BUY" if direction == "LONG" else "SELL"
             t0 = time.perf_counter()
             try:
@@ -1574,14 +1474,13 @@ class BotEngine:
                     except Exception as e:
                         await self.store.log("ERROR", f"[LIVE] {coin} cancel of {entry_order_id} failed: {e} — check the exchange for an orphan position")
                 return
-            # translate to engine's INR bookkeeping using current FX
             lev = int(fill.get("leverage") or lev)       # exchange may cap leverage for the size
             contracts = exec_qty                          # base-asset units
-            entry_price = avg_px * fx                     # INR-equivalent entry
-            notional_inr = exec_qty * avg_px * fx         # actual filled INR notional
-            size_inr = notional_inr / lev                 # margin actually committed
-            entry_fee_inr = fee_usdt * fx
-            target = leader_inr_mid
+            entry_price = avg_px                          # already native USDT
+            notional_usdt = exec_qty * avg_px               # actual filled USDT notional
+            size_usdt = notional_usdt / lev                 # margin actually committed
+            entry_fee_usdt = fee_usdt
+            target = leader_usdt_mid
             stop = entry_price * (1 - stop_pct/100.0) if direction == "LONG" \
                    else entry_price * (1 + stop_pct/100.0)
             await self.store.log(
@@ -1596,11 +1495,11 @@ class BotEngine:
         pos = Position(
             id=str(uuid.uuid4()),
             coin=coin, direction=direction,
-            size_inr=size_inr, contracts=contracts,
-            entry_price_inr=entry_price,
+            size_usdt=size_usdt, contracts=contracts,
+            entry_price_usdt=entry_price,
             binance_ref_usdt=leader.mid,
-            target_price_inr=target,
-            stop_price_inr=stop,
+            target_price_usdt=target,
+            stop_price_usdt=stop,
             opened_at=signal_ts,
             timeout_at=signal_ts + self.cfg.timeout_seconds,
             mode="PAPER" if self.cfg.paper_trading else "LIVE",
@@ -1608,23 +1507,22 @@ class BotEngine:
             create_ms=create_ms,
             fill_confirm_ms=fill_confirm_ms,
             entry_order_id=entry_order_id,
-            fees_inr=entry_fee_inr,
+            fees_usdt=entry_fee_usdt,
             leverage=lev,
-            notional_inr=notional_inr,
+            notional_usdt=notional_usdt,
             basis_pct=basis,
             liq_state=liq_state,
             liq_slippage_pct=liq_slip,
-            requested_notional_inr=requested_notional,
-            entry_fx=max(self.fx.rate, 1e-6),
+            requested_notional_usdt=requested_notional,
             stop_pct=stop_pct,
             stop_basis=stop_basis,
         )
         await self.store.add_open(pos)
-        shrink = f" (shrunk from ₹{requested_notional:.0f})" if notional_inr < requested_notional - 0.5 else ""
-        await self.store.log("TRADE", f"OPEN {direction} {coin} ₹{size_inr:.2f}×{lev} @ {entry_price:.6f}{shrink} · book {liq_state or 'n/a'} slip {liq_slip:.3f}% · stop {stop_pct:.3f}% ({stop_basis}) · target {target:.6f}")
+        shrink = f" (shrunk from ${requested_notional:.0f})" if notional_usdt < requested_notional - 0.5 else ""
+        await self.store.log("TRADE", f"OPEN {direction} {coin} ${size_usdt:.2f}×{lev} @ {entry_price:.6f}{shrink} · book {liq_state or 'n/a'} slip {liq_slip:.3f}% · stop {stop_pct:.3f}% ({stop_basis}) · target {target:.6f}")
         await self.telegram.send(
             f"🟢 <b>OPEN {direction}</b> {coin}\n"
-            f"Margin: ₹{size_inr:.2f} × {lev}x = ₹{notional_inr:.2f} ({contracts:.6f} contracts)\n"
+            f"Margin: ${size_usdt:.2f} × {lev}x = ${notional_usdt:.2f} ({contracts:.6f} contracts)\n"
             f"Entry: {entry_price:.6f} | Target: {target:.6f}\n"
             f"Mode: {pos.mode}"
         )
@@ -1683,23 +1581,19 @@ class BotEngine:
                 await asyncio.sleep(0.3)
         except asyncio.CancelledError: pass
 
-    def _mark_fx(self, pos: Position) -> float:
-        """Rescale a current INR quote into the position's entry-FX frame so FX drift can't fake a target/stop."""
-        return (pos.entry_fx / max(self.fx.rate, 1e-6)) if pos.entry_fx else 1.0
-
     async def _manage_position(self, pos: Position) -> None:
         lagg = self._laggard(pos.coin)
         if not lagg: return
         now = time.time()
-        # mark-to-market (in the entry-FX frame)
-        cur = (lagg.bid if pos.direction == "LONG" else lagg.ask) * self._mark_fx(pos)
+        # mark-to-market: lagg.bid/ask are already native USDT, no rescaling needed
+        cur = lagg.bid if pos.direction == "LONG" else lagg.ask
         reason = None
         if pos.direction == "LONG":
-            if cur >= pos.target_price_inr: reason = "TARGET_HIT"
-            elif cur <= pos.stop_price_inr: reason = "STOP_LOSS"
+            if cur >= pos.target_price_usdt: reason = "TARGET_HIT"
+            elif cur <= pos.stop_price_usdt: reason = "STOP_LOSS"
         else:
-            if cur <= pos.target_price_inr: reason = "TARGET_HIT"
-            elif cur >= pos.stop_price_inr: reason = "STOP_LOSS"
+            if cur <= pos.target_price_usdt: reason = "TARGET_HIT"
+            elif cur >= pos.stop_price_usdt: reason = "STOP_LOSS"
         if not reason and now >= pos.timeout_at: reason = "TIMEOUT"
         if reason: await self._close_position(pos, cur, reason)
 
@@ -1708,26 +1602,26 @@ class BotEngine:
         (marked at the exit side, less the round-trip fees)."""
         lagg = self._laggard(pos.coin)
         if not lagg:
-            return {"mark_price_inr": None, "unrealized_gross_inr": None, "unrealized_net_inr": None}
-        cur = (lagg.bid if pos.direction == "LONG" else lagg.ask) * self._mark_fx(pos)
-        gross = (cur - pos.entry_price_inr) * pos.contracts if pos.direction == "LONG" \
-                else (pos.entry_price_inr - cur) * pos.contracts
-        notional = pos.notional_inr or pos.size_inr * max(1, pos.leverage)
+            return {"mark_price_usdt": None, "unrealized_gross_usdt": None, "unrealized_net_usdt": None}
+        cur = lagg.bid if pos.direction == "LONG" else lagg.ask
+        gross = (cur - pos.entry_price_usdt) * pos.contracts if pos.direction == "LONG" \
+                else (pos.entry_price_usdt - cur) * pos.contracts
+        notional = pos.notional_usdt or pos.size_usdt * max(1, pos.leverage)
         if pos.mode == "LIVE":
-            fees = (pos.fees_inr or 0.0) + notional * self.cfg.exit_taker_fee_pct / 100.0
+            fees = (pos.fees_usdt or 0.0) + notional * self.cfg.exit_taker_fee_pct / 100.0
         else:
             fees = notional * (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct) / 100.0
-        return {"mark_price_inr": round(cur, 6), "unrealized_gross_inr": round(gross, 2),
-                "unrealized_net_inr": round(gross - fees, 2)}
+        return {"mark_price_usdt": round(cur, 6), "unrealized_gross_usdt": round(gross, 2),
+                "unrealized_net_usdt": round(gross - fees, 2)}
 
 
     async def _close_position(self, pos: Position, price: float, reason: str) -> None:
-        exit_fee_inr: Optional[float] = None
+        exit_fee_usdt: Optional[float] = None
         exit_order_id: Optional[str] = None
         if pos.mode == "PAPER":
             # realistic paper exit: walk the opposite side of the book for our contracts
             liq = self.liquidity(pos.coin, "SHORT" if pos.direction == "LONG" else "LONG", pos.contracts * price)
-            if liq and liq["vwap_inr"] > 0: price = liq["vwap_inr"] * self._mark_fx(pos)
+            if liq and liq["vwap_usdt"] > 0: price = liq["vwap_usdt"]
         if pos.mode == "LIVE" and self._live_executor_ready():
             if self._order_cooldown.get(pos.coin, 0) > time.time(): return
             # place reduce_only MARKET on opposite side
@@ -1737,9 +1631,8 @@ class BotEngine:
                 exit_order_id = fill["order_id"]
                 exec_qty, avg_px, fee_usdt = fill["exec_qty"], fill["avg_px"], fill["fee"]
                 if exec_qty > 0 and avg_px > 0:
-                    fx = pos.entry_fx or max(self.fx.rate, 1e-6)
-                    price = avg_px * fx
-                    exit_fee_inr = fee_usdt * fx
+                    price = avg_px
+                    exit_fee_usdt = fee_usdt
                     # partial-fill: shrink contracts to what actually closed
                     if exec_qty < pos.contracts:
                         pos.contracts = exec_qty
@@ -1755,33 +1648,33 @@ class BotEngine:
                 await self.store.log("ERROR", f"[LIVE] {pos.coin} close exception: {e} — position kept open, retry in 10s")
                 return
 
-        notional = pos.notional_inr or pos.size_inr * max(1, pos.leverage)
-        pos.exit_price_inr = price
+        notional = pos.notional_usdt or pos.size_usdt * max(1, pos.leverage)
+        pos.exit_price_usdt = price
         pos.closed_at = time.time()
         pos.close_reason = reason
         pos.exit_order_id = exit_order_id
         if pos.direction == "LONG":
-            gross = (price - pos.entry_price_inr) * pos.contracts
+            gross = (price - pos.entry_price_usdt) * pos.contracts
         else:
-            gross = (pos.entry_price_inr - price) * pos.contracts
+            gross = (pos.entry_price_usdt - price) * pos.contracts
         if pos.mode == "LIVE":
-            entry_fee = pos.fees_inr or 0.0  # captured at open
-            fees = entry_fee + (exit_fee_inr if exit_fee_inr is not None
+            entry_fee = pos.fees_usdt or 0.0  # captured at open
+            fees = entry_fee + (exit_fee_usdt if exit_fee_usdt is not None
                                 else notional * self.cfg.exit_taker_fee_pct/100.0)
         else:
             fees = notional * (self.cfg.entry_taker_fee_pct + self.cfg.exit_taker_fee_pct) / 100.0
-        pos.gross_pnl_inr = gross
-        pos.fees_inr = fees
-        pos.net_pnl_inr = gross - fees
+        pos.gross_pnl_usdt = gross
+        pos.fees_usdt = fees
+        pos.net_pnl_usdt = gross - fees
         pos.status = "CLOSED"
         if reason == "STOP_LOSS" and self.cfg.stop_cooldown_sec > 0:
             # a stop means the signal was wrong at least once for this coin right now - don't
             # let the next tick immediately re-arm the same trade into the same adverse move.
             self._stop_cooldown_until[pos.coin] = time.time() + self.cfg.stop_cooldown_sec
-        self.equity_inr += pos.net_pnl_inr
-        self.realized_pnl_inr += pos.net_pnl_inr
+        self.equity_usdt += pos.net_pnl_usdt
+        self.realized_pnl_usdt += pos.net_pnl_usdt
         self.trade_count += 1
-        if pos.net_pnl_inr >= 0: self.win_count += 1
+        if pos.net_pnl_usdt >= 0: self.win_count += 1
         else: self.loss_count += 1
         self.persist()
         self.total_hold_sec += (pos.closed_at - pos.opened_at)
@@ -1791,13 +1684,13 @@ class BotEngine:
         await self.store.close(pos)
         await self.store.log(
             "TRADE",
-            f"CLOSE {pos.direction} {pos.coin} @ {price:.6f} ({reason}) net ₹{pos.net_pnl_inr:+.2f}"
+            f"CLOSE {pos.direction} {pos.coin} @ {price:.6f} ({reason}) net ${pos.net_pnl_usdt:+.2f}"
         )
-        emoji = "🟩" if pos.net_pnl_inr >= 0 else "🟥"
+        emoji = "🟩" if pos.net_pnl_usdt >= 0 else "🟥"
         await self.telegram.send(
             f"{emoji} <b>CLOSE {pos.direction}</b> {pos.coin} ({reason})\n"
-            f"Exit: {price:.6f} | Net PnL: ₹{pos.net_pnl_inr:+.2f}\n"
-            f"Gross: ₹{gross:+.2f} | Fees: ₹{fees:.2f}\n"
+            f"Exit: {price:.6f} | Net PnL: ${pos.net_pnl_usdt:+.2f}\n"
+            f"Gross: ${gross:+.2f} | Fees: ${fees:.2f}\n"
             f"Mode: {pos.mode}"
         )
 
@@ -1805,7 +1698,7 @@ class BotEngine:
     async def _equity_ticker_loop(self) -> None:
         try:
             while self.running:
-                await self.store.push_equity(time.time(), self.equity_inr)
+                await self.store.push_equity(time.time(), self.equity_usdt)
                 await asyncio.sleep(5)
         except asyncio.CancelledError: pass
 
@@ -1837,17 +1730,17 @@ class BotEngine:
         except asyncio.CancelledError: pass
 
     async def send_daily_digest(self, raise_on_error: bool = False, bench: Optional[Dict[str, Any]] = None) -> None:
-        rows = sorted(self.coin_analytics(), key=lambda r: r["net_pnl_inr"], reverse=True)
+        rows = sorted(self.coin_analytics(), key=lambda r: r["net_pnl_usdt"], reverse=True)
         traded = [r for r in rows if r["trades"]]
         wr = (self.win_count / self.trade_count * 100.0) if self.trade_count else 0.0
         lines = [f"📒 <b>Daily Digest</b> · {datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%d %b %Y %H:%M IST')}",
-                 f"Equity ₹{self.equity_inr:.2f} (start ₹{self.cfg.starting_capital_inr:.0f}) · PnL ₹{self.realized_pnl_inr:+.2f}",
+                 f"Equity ${self.equity_usdt:.2f} (start ${self.cfg.starting_capital_usdt:.0f}) · PnL ${self.realized_pnl_usdt:+.2f}",
                  f"Trades {self.trade_count} · Win {wr:.1f}% · Lev {self.cfg.leverage}x · Slots {self.cfg.num_slots} · {self.cfg.laggard_exchange.upper()}"]
         if traded:
-            lines.append(f"🏆 Best: {traded[0]['coin']} ₹{traded[0]['net_pnl_inr']:+.2f} ({traded[0]['trades']} tr)")
-            lines.append(f"🩸 Worst: {traded[-1]['coin']} ₹{traded[-1]['net_pnl_inr']:+.2f} ({traded[-1]['trades']} tr)")
-            lines.append("<pre>coin  tr  win%   net₹   T/O</pre>")
-            lines.append("<pre>" + "\n".join(f"{r['coin']:<5}{r['trades']:>3}{r['win_rate']:>6.0f}{r['net_pnl_inr']:>8.2f}{r['timeouts']:>5}" for r in traded) + "</pre>")
+            lines.append(f"🏆 Best: {traded[0]['coin']} ${traded[0]['net_pnl_usdt']:+.2f} ({traded[0]['trades']} tr)")
+            lines.append(f"🩸 Worst: {traded[-1]['coin']} ${traded[-1]['net_pnl_usdt']:+.2f} ({traded[-1]['trades']} tr)")
+            lines.append("<pre>coin  tr  win%   net$   T/O</pre>")
+            lines.append("<pre>" + "\n".join(f"{r['coin']:<5}{r['trades']:>3}{r['win_rate']:>6.0f}{r['net_pnl_usdt']:>8.2f}{r['timeouts']:>5}" for r in traded) + "</pre>")
         fh = self.feed_health()
         lg = fh.get("laggard") or {}
         lines.append(f"📡 Feed {fh['source']} · wire {lg.get('wire_latency_ms') or '—'} ms · rc {lg.get('reconnects', 0)}")
@@ -1866,8 +1759,8 @@ class BotEngine:
         msg = (
             f"📊 <b>Hourly Summary</b>\n"
             f"Trades: {self.trade_count}  |  Win rate: {wr:.1f}%\n"
-            f"Realized PnL: ₹{self.realized_pnl_inr:+.2f}\n"
-            f"Equity: ₹{self.equity_inr:.2f}\n"
+            f"Realized PnL: ${self.realized_pnl_usdt:+.2f}\n"
+            f"Equity: ${self.equity_usdt:.2f}\n"
             f"Avg hold: {avg_hold:.1f}s  |  Avg exec latency: {avg_lat:.0f}ms\n"
             f"Mode: {'PAPER' if self.cfg.paper_trading else 'LIVE'}"
         )
@@ -1890,11 +1783,11 @@ class BotEngine:
             "spike_filter": {**self.spike_stats, "persist_ms": self.cfg.spike_persist_ms,
                              "arming": sorted(c for c, s in self._last_signal_state.items() if s.startswith("ARMING"))},
             "started_at": self.started_at,
-            "equity_inr": round(self.equity_inr, 2),
-            "starting_capital_inr": self.cfg.starting_capital_inr,
-            "realized_pnl_inr": round(self.realized_pnl_inr, 2),
-            "free_margin_inr": round(self.equity_inr - sum(p.size_inr for p in self.store.open.values()), 2),
-            "allocated_per_slot_inr": round(self.allocated_per_slot_inr(), 2),
+            "equity_usdt": round(self.equity_usdt, 2),
+            "starting_capital_usdt": self.cfg.starting_capital_usdt,
+            "realized_pnl_usdt": round(self.realized_pnl_usdt, 2),
+            "free_margin_usdt": round(self.equity_usdt - sum(p.size_usdt for p in self.store.open.values()), 2),
+            "allocated_per_slot_usdt": round(self.allocated_per_slot_usdt(), 2),
             "num_slots": self.cfg.num_slots,
             "hurdle_pct": round(self.hurdle_pct(), 3),
             "trades": self.trade_count,
@@ -1903,7 +1796,6 @@ class BotEngine:
             "win_rate": round(wr, 2),
             "avg_hold_sec": round(avg_hold, 2),
             "avg_exec_latency_ms": round(avg_lat, 1),
-            "fx_usdt_inr": round(self.fx.rate, 4),
             "leverage": self.cfg.leverage,
             "laggard_exchange": self.cfg.laggard_exchange,
             "basis_filter": self.cfg.basis_filter,

@@ -156,7 +156,7 @@ class CoinDCXFuturesClient:
         self._secret = api_secret.encode()
         self.base_url = base_url.rstrip("/")
         self._timeout = aiohttp.ClientTimeout(total=timeout_s)
-        self.margin_currency = (margin_currency or "USDT").upper()   # INR or USDT margined futures
+        self.margin_currency = "USDT"   # USDT-margined only, by design — see autodetect_margin_currency()
         self.limiter = RateLimiterGroup(600)   # 16 req/s general; stay well below
         self.http_429_count = 0
         self.user_stream: Optional[CoinDCXUserStream] = None
@@ -222,16 +222,9 @@ class CoinDCXFuturesClient:
         return await self._request("GET", "/exchange/v1/derivatives/futures/wallets")
 
     async def autodetect_margin_currency(self) -> str:
-        """Pick INR or USDT — whichever futures wallet holds more free balance."""
-        wallets = await self.wallet_balance()
-        best, best_bal = self.margin_currency, -1.0
-        for w in wallets if isinstance(wallets, list) else []:
-            cur = str(w.get("currency_short_name", "")).upper()
-            if cur in ("INR", "USDT"):
-                bal = float(w.get("balance") or 0)
-                if bal > best_bal: best, best_bal = cur, bal
-        self.margin_currency = best
-        return best
+        """USDT-margined only, by design (CoinSwitch is USDT-only too, so both laggards stay in sync)."""
+        self.margin_currency = "USDT"
+        return "USDT"
 
     async def positions(self, pairs: Optional[List[str]] = None) -> Any:
         body: Dict[str, Any] = {"page": "1", "size": "50", "margin_currency_short_name": [self.margin_currency]}

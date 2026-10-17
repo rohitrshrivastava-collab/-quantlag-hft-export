@@ -26,12 +26,12 @@ class SQLiteStore:
         self._db = await aiosqlite.connect(self.path)
         await self._db.executescript("""
         CREATE TABLE IF NOT EXISTS positions (
-            id TEXT PRIMARY KEY, coin TEXT, direction TEXT, size_inr REAL,
-            contracts REAL, entry_price_inr REAL, binance_ref_usdt REAL,
-            target_price_inr REAL, stop_price_inr REAL, opened_at REAL,
+            id TEXT PRIMARY KEY, coin TEXT, direction TEXT, size_usdt REAL,
+            contracts REAL, entry_price_usdt REAL, binance_ref_usdt REAL,
+            target_price_usdt REAL, stop_price_usdt REAL, opened_at REAL,
             timeout_at REAL, mode TEXT, status TEXT,
-            exit_price_inr REAL, closed_at REAL, gross_pnl_inr REAL,
-            fees_inr REAL, net_pnl_inr REAL, close_reason TEXT,
+            exit_price_usdt REAL, closed_at REAL, gross_pnl_usdt REAL,
+            fees_usdt REAL, net_pnl_usdt REAL, close_reason TEXT,
             exec_latency_ms REAL
         );
         CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);

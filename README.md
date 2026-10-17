@@ -1,8 +1,9 @@
 # QuantLag HFT — Lead-Lag Latency Arbitrage Bot
 
 Automated cross-exchange arbitrage that exploits price-discovery delay between
-**Binance USDT-M Futures** (leader) and **CoinSwitch PRO Crypto Futures** (INR
-laggard).  Ships as:
+**Binance USDT-M Futures** (leader) and **CoinSwitch PRO / CoinDCX Futures**
+(USDT-margined laggard — both exchanges trade USDT only, so the whole engine
+is native USDT end to end, no FX conversion anywhere in the loop). Ships as:
 
 1. **Standalone async Python bot** (`standalone_bot/`) — runs in VS Code
    locally or on an **AWS EC2 Ubuntu instance in `ap-south-1` (Mumbai)** for
@@ -19,8 +20,8 @@ The same async engine (`backend/bot_engine.py`) powers both.
 ```
                    ┌────────────────────────────┐
                    │      DataIngestion         │
-                   │  Binance WS + CoinSwitch WS│
-                   │  + USDT/INR FX poller      │
+                   │  Binance WS + CoinSwitch/  │
+                   │     CoinDCX WS (both USDT) │
                    └────────────┬───────────────┘
                                 │ TopOfBook stream
                                 ▼
@@ -28,7 +29,7 @@ The same async engine (`backend/bot_engine.py`) powers both.
 │ PortfolioMgr   │◄──►│      SignalEngine       │◄──►│ OrderExecutor  │
 │ (10 slots,     │    │ - Net-spread hurdle gate│    │ - Paper fills  │
 │  equal weight, │    │ - Direction (LONG/SHORT)│    │ - Live REST    │
-│  ₹400 default) │    │ - Timeout / stop-loss   │    │ - Partial-fill │
+│  $50 default)  │    │ - Timeout / stop-loss   │    │ - Partial-fill │
 └────────────────┘    └────────────┬───────────┘    └────────┬───────┘
                                    │                          │
                                    ▼                          ▼
@@ -43,8 +44,7 @@ The same async engine (`backend/bot_engine.py`) powers both.
 | Module | Responsibility |
 | --- | --- |
 | `MarketSimulator` / `LiveBinanceFeed` | Top-of-book feed via WebSocket (or realistic simulator when `SIMULATE_MARKET=true`) |
-| `FXRateService` | Real-time USDT/INR quote (CoinGecko median, 30 s cadence, fallback to config) |
-| `SignalEngine` (`_scan_loop`) | Every ~400 ms: computes `(Binance INR-mid − CoinSwitch mid) / CoinSwitch mid × 100`. Fires LONG if gross > hurdle, SHORT if `-gross > hurdle` |
+| `SignalEngine` (`_scan_loop`) | Every ~400 ms: computes `(Binance mid − laggard mid) / laggard mid × 100` — both sides already native USDT, no conversion. Fires LONG if gross > hurdle, SHORT if `-gross > hurdle` |
 | `PortfolioManager` | Dynamic equal-weight sizing: `equity / num_slots`. Enforces one-position-per-coin lock |
 | `OrderExecutor` (`_open_position`, `_close_position`) | Paper: simulates fills at top-of-book with 80–220 ms latency. Live: REST hook (stubbed — plug your CoinSwitch REST client) |
 | `TelegramReporter` | Sends HTML-formatted entry/exit alerts + hourly summary |
@@ -57,13 +57,12 @@ enter if abs(gross_spread_pct) > hurdle_pct
 ```
 
 **Exit conditions** (checked every ~300 ms per open position):
-- **TARGET_HIT** — CoinSwitch price catches Binance INR reference at entry
+- **TARGET_HIT** — laggard price catches the Binance reference at entry
 - **STOP_LOSS** — hard volatility stop (`STOP_LOSS_PCT`)
 - **TIMEOUT** — time-based flush (`TIMEOUT_SECONDS`, default 45 s)
 
 **Resilience**
 - WS auto-reconnect with exponential backoff (1s → 30s cap)
-- FX poller falls back to last-known / config value on REST failure
 - Async token-bucket ready to add for REST fan-out; SQLite restart resumes open positions and continues managing stops/timeouts
 
 ---
@@ -125,13 +124,13 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
 | --- | --- | --- |
 | `PAPER_TRADING` | `true` | Simulate fills against real top-of-book without touching CoinSwitch REST |
 | `SIMULATE_MARKET` | `true` | Use the built-in market simulator instead of real WS feeds |
-| `STARTING_CAPITAL_INR` | `4000` | Base equity divided across `num_slots` |
+| `STARTING_CAPITAL_USDT` | `50` | Base equity divided across `num_slots` |
 | `ENTRY_FEE_PCT` / `EXIT_FEE_PCT` | `0.05` | CoinSwitch taker fees (per side) |
 | `SLIPPAGE_BUFFER_PCT` | `0.03` | Additional slippage guard |
 | `HURDLE_EXTRA_PCT` | `0.02` | Extra edge required beyond fees+slippage |
 | `TIMEOUT_SECONDS` | `45` | Time-based flush window |
 | `STOP_LOSS_PCT` | `0.35` | Hard volatility stop-loss |
-| `FX_USDT_INR` | `84.5` | Fallback USDT/INR rate |
+| `COINDCX_MARGIN_CURRENCY` | `USDT` | Forced USDT-only — CoinDCX never margins in INR, by design |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | *(empty)* | Optional Telegram alerts |
 | `BINANCE_API_KEY` / `_SECRET` | *(empty)* | Required only when disabling `PAPER_TRADING` |
 | `COINSWITCH_API_KEY` / `_SECRET` | *(empty)* | Ed25519 hex-encoded key pair from CoinSwitch PRO. Required when disabling `PAPER_TRADING`. Base URL defaults to `https://coinswitch.co` (override with `COINSWITCH_BASE_URL`) |
@@ -159,12 +158,13 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
 `wallet_balance`, `positions`, `instrument_info`, `ticker`, `order_book`,
 `place_order`, `get_order_status`, `cancel_order`, `cancel_all_open_orders`.
 
-- **Entry** (`_open_position` LIVE branch): converts INR slot allocation →
-  USDT quantity via current FX and Binance USDT price, submits a `MARKET`
-  order on `EXCHANGE_2` (`{COIN}USDT`), then polls `get_order_status`
+- **Entry** (`_open_position` LIVE branch): the slot's USDT notional ÷
+  Binance USDT price gives the order quantity directly (no FX step — the
+  wallet, the order, and the slot sizing are all already USDT), submits a
+  `MARKET` order on `EXCHANGE_2` (`{COIN}USDT`), then polls `get_order_status`
   until terminal (`EXECUTED` / `PARTIALLY_EXECUTED` are both accepted;
   Futures treats partial as terminal per CoinSwitch docs). The engine
-  records the **actual** fill quantity, average fill price × FX, and real
+  records the **actual** fill quantity, average fill price, and real
   `execution_fee`.
 - **Exit** (`_close_position` LIVE branch): submits an opposite-side
   `MARKET` order with `reduce_only=true` for the exact filled quantity —
@@ -198,9 +198,8 @@ Dashboard endpoints (`/api/*`): `status`, `spreads`, `positions/open`,
 | `BASIS_FILTER` / `BASIS_WINDOW_S` | `true` / `300` | Subtract the rolling median CoinSwitch–Binance offset so a standing basis is not traded as lag. |
 | `DIGEST_TIME_IST` | `23:30` | Daily Telegram digest time (per-coin table, feed health, last benchmark). |
 
-## Persistence, FX blend & session replay
+## Persistence & session replay
 - `DATA_DIR` (default `./data`): `settings.json` (slots, leverage, equity, PnL counters, paused coins, config) restored on restart; `ticks/YYYY-MM-DD.jsonl` tick recordings (`RECORD_TICKS=true`, `TICK_RETENTION_DAYS=7`).
-- USDT/INR = median of CoinGecko, CoinDCX spot USDTINR and Binance P2P; sources visible in the dashboard config panel.
 - Session Replay panel / `POST /api/replay/run` replays any recorded day through the engine rules with your own hurdle / basis / leverage / slots.
 - `POST /api/coindcx/check` — CoinDCX Futures key preflight (dashboard "Check CoinDCX").
 

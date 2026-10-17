@@ -63,8 +63,8 @@ async def main() -> None:
     cfg = BotConfig.from_env()
     print(f" Mode           : {'PAPER' if cfg.paper_trading else 'LIVE'}")
     print(f" Simulator      : {cfg.simulate}")
-    print(f" Starting cap.  : ₹{cfg.starting_capital_inr:,.2f}")
-    print(f" Slots          : {cfg.num_slots} × ₹{cfg.starting_capital_inr/cfg.num_slots:,.2f}")
+    print(f" Starting cap.  : ${cfg.starting_capital_usdt:,.2f}")
+    print(f" Slots          : {cfg.num_slots} × ${cfg.starting_capital_usdt/cfg.num_slots:,.2f}")
     print(f" Hurdle gate    : {(cfg.entry_taker_fee_pct+cfg.exit_taker_fee_pct+cfg.slippage_buffer_pct+cfg.hurdle_extra_pct):.3f} %")
     print(f" Timeout        : {cfg.timeout_seconds}s   Stop-loss: {cfg.stop_loss_pct}%")
     print(f" Telegram       : {'ENABLED' if cfg.telegram_bot_token and cfg.telegram_chat_id else 'muted'}")
@@ -87,10 +87,9 @@ async def main() -> None:
         while not stop_evt.is_set():
             await asyncio.sleep(15)
             s = engine.snapshot()
-            print(f"[{time.strftime('%H:%M:%S')}] eq=₹{s['equity_inr']:.2f}  "
-                  f"pnl=₹{s['realized_pnl_inr']:+.2f}  "
-                  f"trades={s['trades']} (W{s['wins']}/L{s['losses']})  "
-                  f"fx={s['fx_usdt_inr']:.3f}")
+            print(f"[{time.strftime('%H:%M:%S')}] eq=${s['equity_usdt']:.2f}  "
+                  f"pnl=${s['realized_pnl_usdt']:+.2f}  "
+                  f"trades={s['trades']} (W{s['wins']}/L{s['losses']})")
     asyncio.create_task(_snap())
 
     await stop_evt.wait()

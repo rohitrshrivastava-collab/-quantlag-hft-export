@@ -91,7 +91,7 @@ class ConfigUpdate(BaseModel):
     basis_window_s: Optional[int] = Field(default=None, ge=30, le=3600)
     max_slippage_pct: Optional[float] = Field(default=None, ge=0, le=2)
     phantom_frozen_s: Optional[float] = Field(default=None, ge=0.5, le=60)
-    min_order_inr: Optional[float] = Field(default=None, ge=1, le=1e6)
+    min_order_usdt: Optional[float] = Field(default=None, ge=1, le=1e6)
     max_entry_frozen_s: Optional[float] = Field(default=None, ge=0.1, le=60)
     spike_persist_ms: Optional[int] = Field(default=None, ge=0, le=10000)
     max_book_share_pct: Optional[float] = Field(default=None, ge=1, le=100)
@@ -107,7 +107,7 @@ class ConfigUpdate(BaseModel):
 
 
 class AccountUpdate(BaseModel):
-    equity_inr: Optional[float] = Field(default=None, gt=0, le=1e9)
+    equity_usdt: Optional[float] = Field(default=None, gt=0, le=1e9)
     num_slots: Optional[int] = Field(default=None, ge=1, le=50)
     leverage: Optional[int] = Field(default=None, ge=1, le=100)
 
@@ -184,16 +184,16 @@ async def coinswitch_trial_watcher() -> None:
                 TRIAL["last_usdt"] = usdt
                 TRIAL["waiting"] = usdt < 4.0
                 if usdt >= 4.0 and not await ENGINE.store.all_open():
-                    equity = round(usdt * max(ENGINE.fx.rate, 1e-6) * 0.98, 2)
-                    if ENGINE.cfg.num_slots == 1 and int(ENGINE.cfg.leverage) == 10 and abs(ENGINE.equity_inr - equity) / max(equity, 1) < 0.1:
-                        TRIAL.update(armed=True, waiting=False, message=f"CoinSwitch trial active: {usdt:.2f} USDT, equity ₹{ENGINE.equity_inr:.2f}, 1 slot, 10x")
+                    equity = round(usdt * 0.98, 2)
+                    if ENGINE.cfg.num_slots == 1 and int(ENGINE.cfg.leverage) == 10 and abs(ENGINE.equity_usdt - equity) / max(equity, 1) < 0.1:
+                        TRIAL.update(armed=True, waiting=False, message=f"CoinSwitch trial active: {usdt:.2f} USDT, equity ${ENGINE.equity_usdt:.2f}, 1 slot, 10x")
                         continue   # already armed before a reload — don't reset stats again
                     await ENGINE.reset_account(equity)
                     ENGINE.cfg.num_slots = 1
                     errors = await ENGINE.apply_leverage(10)
                     ENGINE.persist()
                     TRIAL.update(armed=True, waiting=False, armed_at=time.time(),
-                                 message=f"CoinSwitch trial armed: {usdt:.2f} USDT → equity ₹{equity}, 1 slot, 10x" + (f" (leverage errors: {errors[:2]})" if errors else ""))
+                                 message=f"CoinSwitch trial armed: {usdt:.2f} USDT → equity ${equity}, 1 slot, 10x" + (f" (leverage errors: {errors[:2]})" if errors else ""))
                     await ENGINE.store.log("INFO", TRIAL["message"])
                     try: await ENGINE.telegram.send(TRIAL["message"])
                     except Exception: pass
@@ -285,7 +285,7 @@ async def get_config():
         "hurdle_pct": ENGINE.hurdle_pct(),
         "timeout_seconds": c.timeout_seconds,
         "stop_loss_pct": c.stop_loss_pct,
-        "starting_capital_inr": c.starting_capital_inr,
+        "starting_capital_usdt": c.starting_capital_usdt,
         "num_slots": c.num_slots,
         "coins": c.coins,
         "simulate": c.simulate,
@@ -297,7 +297,7 @@ async def get_config():
         "digest_time_ist": c.digest_time_ist,
         "max_slippage_pct": c.max_slippage_pct,
         "phantom_frozen_s": c.phantom_frozen_s,
-        "min_order_inr": c.min_order_inr,
+        "min_order_usdt": c.min_order_usdt,
         "max_entry_frozen_s": c.max_entry_frozen_s,
         "spike_persist_ms": c.spike_persist_ms,
         "scan_interval_s": c.scan_interval_s,
@@ -322,15 +322,15 @@ async def update_account(body: AccountUpdate):
     """Manual Total Equity / slots / leverage. Equity reset requires no open positions."""
     changes: Dict[str, Any] = {}
     open_n = len(await ENGINE.store.all_open())
-    if body.equity_inr is not None:
+    if body.equity_usdt is not None:
         if open_n:
             raise HTTPException(status_code=409, detail=f"close {open_n} open position(s) before resetting equity")
-        await ENGINE.reset_account(body.equity_inr)
-        changes["equity_inr"] = body.equity_inr
+        await ENGINE.reset_account(body.equity_usdt)
+        changes["equity_usdt"] = body.equity_usdt
     if body.num_slots is not None:
         ENGINE.cfg.num_slots = body.num_slots
         changes["num_slots"] = body.num_slots
-        await ENGINE.store.log("INFO", f"Slots set to {body.num_slots} (₹{ENGINE.allocated_per_slot_inr():.2f}/slot)")
+        await ENGINE.store.log("INFO", f"Slots set to {body.num_slots} (${ENGINE.allocated_per_slot_usdt():.2f}/slot)")
     errors: List[str] = []
     if body.leverage is not None:
         errors = await ENGINE.apply_leverage(body.leverage)
@@ -389,7 +389,7 @@ async def coindcx_test_order(body: CoinDCXTestOrder):
         qty = math.ceil((notional / px) / step) * step
         qty = max(qty, float(inst.get("min_quantity") or step))
         qty = float(f"{qty:.10g}")
-        need = qty * px * (ENGINE.fx.rate if margin_ccy == "INR" else 1.0) * 1.02 / body.leverage
+        need = qty * px * 1.02 / body.leverage
         if free.get(margin_ccy, 0) < need:
             raise HTTPException(status_code=424, detail={"message": f"insufficient free {margin_ccy} margin: have {free.get(margin_ccy, 0):.2f}, need ≈ {need:.2f}", "steps": steps})
         steps.append({"step": "sizing", "ok": True, "price": px, "qty": qty, "notional_usdt": round(qty * px, 4),
@@ -439,7 +439,7 @@ class ReplayRequest(BaseModel):
     basis_window_s: Optional[int] = Field(default=None, ge=30, le=3600)
     leverage: Optional[int] = Field(default=None, ge=1, le=100)
     num_slots: Optional[int] = Field(default=None, ge=1, le=50)
-    equity_inr: Optional[float] = Field(default=None, gt=0)
+    equity_usdt: Optional[float] = Field(default=None, gt=0)
     timeout_seconds: Optional[int] = Field(default=None, ge=1, le=3600)
     stop_loss_pct: Optional[float] = Field(default=None, gt=0, le=50)
 
@@ -465,7 +465,7 @@ async def replay_run(body: ReplayRequest):
               basis_filter=c.basis_filter if body.basis_filter is None else body.basis_filter,
               basis_window_s=body.basis_window_s or c.basis_window_s,
               leverage=body.leverage or c.leverage, num_slots=body.num_slots or c.num_slots,
-              equity_inr=body.equity_inr or c.starting_capital_inr,
+              equity_usdt=body.equity_usdt or c.starting_capital_usdt,
               timeout_seconds=body.timeout_seconds or c.timeout_seconds,
               stop_loss_pct=body.stop_loss_pct or c.stop_loss_pct,
               fee_round_trip_pct=c.entry_taker_fee_pct + c.exit_taker_fee_pct)
@@ -474,7 +474,7 @@ async def replay_run(body: ReplayRequest):
         await asyncio.to_thread(ENGINE.recorder._flush)
         res = await asyncio.to_thread(replay_session, path, **kw)
         REPLAY["result"] = res
-        await ENGINE.store.log("INFO", f"Replay {body.date}: {res['trades']} trades, net ₹{res['net_pnl_inr']:+.2f} @ hurdle {kw['hurdle_pct']:.3f}%")
+        await ENGINE.store.log("INFO", f"Replay {body.date}: {res['trades']} trades, net ${res['net_pnl_usdt']:+.2f} @ hurdle {kw['hurdle_pct']:.3f}%")
         return res
     except Exception as e:
         REPLAY["error"] = str(e)
@@ -517,11 +517,11 @@ async def replay_sweep_run(body: SweepRequest):
         res = await asyncio.to_thread(
             replay_sweep, path, hurdles=body.hurdles, basis_windows=body.basis_windows, coins=c.coins,
             basis_filter=body.basis_filter, leverage=body.leverage or c.leverage, num_slots=body.num_slots or c.num_slots,
-            equity_inr=c.starting_capital_inr, timeout_seconds=c.timeout_seconds, stop_loss_pct=c.stop_loss_pct,
+            equity_usdt=c.starting_capital_usdt, timeout_seconds=c.timeout_seconds, stop_loss_pct=c.stop_loss_pct,
             fee_round_trip_pct=c.entry_taker_fee_pct + c.exit_taker_fee_pct)
         REPLAY["sweep"] = res
         b = res["best"]
-        if b: await ENGINE.store.log("INFO", f"Sweep {body.date}: best hurdle {b['hurdle_pct']}% / window {b['basis_window_s']}s → ₹{b['net_pnl_inr']:+.2f} ({b['trades']} trades)")
+        if b: await ENGINE.store.log("INFO", f"Sweep {body.date}: best hurdle {b['hurdle_pct']}% / window {b['basis_window_s']}s → ${b['net_pnl_usdt']:+.2f} ({b['trades']} trades)")
         return res
     except Exception as e:
         REPLAY["error"] = str(e)
@@ -608,19 +608,18 @@ async def compare_reset():
 
 
 @api.get("/liquidity/{coin}")
-async def liquidity(coin: str, notional_inr: Optional[float] = None, direction: str = "LONG"):
+async def liquidity(coin: str, notional_usdt: Optional[float] = None, direction: str = "LONG"):
     coin = coin.upper()
     if coin not in ENGINE.cfg.coins:
         raise HTTPException(status_code=404, detail="coin not in universe")
-    notional = notional_inr or ENGINE.allocated_per_slot_inr() * max(1, ENGINE.cfg.leverage)
+    notional = notional_usdt or ENGINE.allocated_per_slot_usdt() * max(1, ENGINE.cfg.leverage)
     liq = ENGINE.liquidity(coin, direction.upper(), notional)
     if liq is None:
         raise HTTPException(status_code=503, detail="no order-book depth yet for this coin")
     feed = ENGINE.coinswitch_feed
     bids, asks = feed.depth.get(coin, ([], []))
-    fx = ENGINE.fx.rate
     return {"coin": coin, "direction": direction.upper(), **liq,
-            "book_inr": {"bids": [[round(p * fx, 6), q] for p, q in bids[:10]], "asks": [[round(p * fx, 6), q] for p, q in asks[:10]]}}
+            "book_usdt": {"bids": [[round(p, 6), q] for p, q in bids[:10]], "asks": [[round(p, 6), q] for p, q in asks[:10]]}}
 
 
 @api.get("/positions/open")
@@ -649,9 +648,9 @@ async def positions_closed(limit: int = 200, coin: Optional[str] = None):
     return {"items": items}
 
 
-CSV_COLUMNS = ["id", "coin", "direction", "mode", "size_inr", "contracts", "entry_price_inr", "exit_price_inr",
-               "binance_ref_usdt", "target_price_inr", "stop_price_inr", "opened_at", "closed_at",
-               "gross_pnl_inr", "fees_inr", "net_pnl_inr", "close_reason", "exec_latency_ms",
+CSV_COLUMNS = ["id", "coin", "direction", "mode", "size_usdt", "contracts", "entry_price_usdt", "exit_price_usdt",
+               "binance_ref_usdt", "target_price_usdt", "stop_price_usdt", "opened_at", "closed_at",
+               "gross_pnl_usdt", "fees_usdt", "net_pnl_usdt", "close_reason", "exec_latency_ms",
                "entry_order_id", "exit_order_id"]
 
 
@@ -760,7 +759,7 @@ async def benchmark_verdict(coinswitch_fee_pct: Optional[float] = None, coindcx_
     if coindcx_fee_pct is not None: fees["coindcx"] = coindcx_fee_pct
     return evaluate_verdict(
         BENCH["result"], slippage_pct=ENGINE.cfg.slippage_buffer_pct, extra_pct=ENGINE.cfg.hurdle_extra_pct,
-        fees_pct=fees, slot_inr=ENGINE.allocated_per_slot_inr(), fx=ENGINE.fx.rate,
+        fees_pct=fees, slot_usdt=ENGINE.allocated_per_slot_usdt(),
     )
 
 
@@ -779,7 +778,6 @@ async def telemetry():
     snap = ENGINE.snapshot()
     return {
         "ws_connected": ENGINE.running,
-        "fx_usdt_inr": snap["fx_usdt_inr"],
         "avg_exec_latency_ms": snap["avg_exec_latency_ms"],
         "mode": snap["mode"],
         "simulate": ENGINE.cfg.simulate,
@@ -805,8 +803,8 @@ async def telegram_test():
         snap = ENGINE.snapshot()
         await tg.send(
             "🔔 <b>QuantLag HFT test alert</b>\n"
-            f"Mode: {snap['mode']} · Equity: ₹{snap['equity_inr']:.2f}\n"
-            f"Trades: {snap['trades']} · Realized PnL: ₹{snap['realized_pnl_inr']:+.2f}\n"
+            f"Mode: {snap['mode']} · Equity: ${snap['equity_usdt']:.2f}\n"
+            f"Trades: {snap['trades']} · Realized PnL: ${snap['realized_pnl_usdt']:+.2f}\n"
             f"Sent at {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}",
             raise_on_error=True,
         )
@@ -850,8 +848,8 @@ async def hourly_summary():
         "wins": snap["wins"],
         "losses": snap["losses"],
         "win_rate": snap["win_rate"],
-        "realized_pnl_inr": snap["realized_pnl_inr"],
-        "equity_inr": snap["equity_inr"],
+        "realized_pnl_usdt": snap["realized_pnl_usdt"],
+        "equity_usdt": snap["equity_usdt"],
         "avg_hold_sec": snap["avg_hold_sec"],
         "avg_exec_latency_ms": snap["avg_exec_latency_ms"],
         "mode": snap["mode"],
