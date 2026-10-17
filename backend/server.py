@@ -100,6 +100,7 @@ class ConfigUpdate(BaseModel):
     vol_k: Optional[float] = Field(default=None, ge=0.5, le=6)
     stop_min_pct: Optional[float] = Field(default=None, ge=0.05, le=5)
     stop_max_pct: Optional[float] = Field(default=None, ge=0.1, le=10)
+    stop_cooldown_sec: Optional[float] = Field(default=None, ge=0, le=3600)
     breakeven_floor: Optional[bool] = None
     auto_universe: Optional[bool] = None
     max_coin_price_usd: Optional[float] = Field(default=None, ge=0, le=1e9)
@@ -306,6 +307,7 @@ async def get_config():
         "vol_k": c.vol_k,
         "stop_min_pct": c.stop_min_pct,
         "stop_max_pct": c.stop_max_pct,
+        "stop_cooldown_sec": c.stop_cooldown_sec,
         "breakeven_floor": c.breakeven_floor,
         "depth_bps": c.depth_bps,
         "auto_universe": c.auto_universe,

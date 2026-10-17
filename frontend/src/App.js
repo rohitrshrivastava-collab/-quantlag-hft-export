@@ -619,6 +619,7 @@ function FeedHealthStrip({ feed }) {
 
 const stateBadge = (state) => {
   if (state === "PAUSED") return "px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-slate-600 bg-slate-800/60 text-slate-300";
+  if (state === "STOP_COOLDOWN") return "px-1.5 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-amber-900 bg-amber-950/40 text-amber-400/80";
   const map = {
     WAITING: "bg-slate-800 text-slate-400 border-slate-700",
     HURDLE_MET_LONG: "bg-emerald-950/50 text-emerald-300 border-emerald-800 animate-pulse",
@@ -809,6 +810,7 @@ function Dashboard() {
       vol_k: Number(cfgDraft.vol_k),
       stop_min_pct: Number(cfgDraft.stop_min_pct),
       stop_max_pct: Number(cfgDraft.stop_max_pct),
+      stop_cooldown_sec: Number(cfgDraft.stop_cooldown_sec),
       stop_mode: cfgDraft.stop_mode,
       breakeven_floor: !!cfgDraft.breakeven_floor,
     });
@@ -1233,6 +1235,7 @@ function Dashboard() {
                   ["vol_k", "Stop = k·σ (k)", "config-vol-k-input"],
                   ["stop_min_pct", "Stop min %", "config-stop-min-input"],
                   ["stop_max_pct", "Stop max %", "config-stop-max-input"],
+                  ["stop_cooldown_sec", "Stop cooldown (s)", "config-stop-cooldown-input"],
                 ].map(([k, label, tid]) => (
                   <label key={k} className="block">
                     <span className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">{label}</span>

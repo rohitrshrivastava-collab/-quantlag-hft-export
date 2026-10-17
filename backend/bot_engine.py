@@ -109,6 +109,7 @@ class BotConfig:
     vol_k: float = 2.0                     # stop = k × σ over the timeout horizon
     stop_min_pct: float = 0.15
     stop_max_pct: float = 1.0
+    stop_cooldown_sec: float = 60.0        # no re-entry on a coin for this long after it stops out
     breakeven_floor: bool = True           # target may never sit below entry + fees
     # dynamic coin universe
     auto_universe: bool = True             # continuously rebuild the traded shortlist
@@ -174,6 +175,7 @@ class BotConfig:
             vol_k=_f("VOL_K", 2.0),
             stop_min_pct=_f("STOP_MIN_PCT", 0.15),
             stop_max_pct=_f("STOP_MAX_PCT", 1.0),
+            stop_cooldown_sec=_f("STOP_COOLDOWN_SEC", 60.0),
             breakeven_floor=_b("BREAKEVEN_FLOOR", True),
             auto_universe=_b("AUTO_UNIVERSE", True),
             max_coin_price_usd=_f("MAX_COIN_PRICE_USD", 0.0),
@@ -912,6 +914,7 @@ class BotEngine:
             except Exception as e:
                 logger.warning(f"CoinDCX client init failed: {e}")
         self._order_cooldown: Dict[str, float] = {}
+        self._stop_cooldown_until: Dict[str, float] = {}  # coin -> ts; blocks re-entry after a STOP_LOSS, both modes
         self._basis_samples: Dict[str, List[tuple]] = {c: [] for c in cfg.coins}
         self.settings_path = self.data_dir / "settings.json"
         self.recorder = TickRecorder(self.data_dir / "ticks", cfg.tick_retention_days, enabled=cfg.record_ticks and not cfg.simulate)
@@ -1371,6 +1374,9 @@ class BotEngine:
         if coin in self.paused:
             self._last_signal_state[coin] = "PAUSED"
             return
+        if self._stop_cooldown_until.get(coin, 0) > now:
+            self._last_signal_state[coin] = "STOP_COOLDOWN"
+            return
         # max-price cap: only trade coins whose live price is at or below the cap (0 = no cap)
         if self.cfg.max_coin_price_usd > 0 and leader.mid > self.cfg.max_coin_price_usd:
             self._last_signal_state[coin] = "PRICE_CAPPED"
@@ -1768,6 +1774,10 @@ class BotEngine:
         pos.fees_inr = fees
         pos.net_pnl_inr = gross - fees
         pos.status = "CLOSED"
+        if reason == "STOP_LOSS" and self.cfg.stop_cooldown_sec > 0:
+            # a stop means the signal was wrong at least once for this coin right now - don't
+            # let the next tick immediately re-arm the same trade into the same adverse move.
+            self._stop_cooldown_until[pos.coin] = time.time() + self.cfg.stop_cooldown_sec
         self.equity_inr += pos.net_pnl_inr
         self.realized_pnl_inr += pos.net_pnl_inr
         self.trade_count += 1
