@@ -98,7 +98,7 @@ class BotConfig:
     max_slippage_pct: float = 0.05         # max round-trip slippage (entry+exit) we accept
     phantom_frozen_s: float = 3.0          # laggard book unchanged this long while Binance ticks → PHANTOM
     depth_bps: float = 10.0                # resting-depth window reported per coin
-    min_order_usdt: float = 100.0           # shrink floor: skip if the book can't absorb at least this
+    min_order_usdt: float = 5.0             # shrink floor: skip if the book can't absorb at least this; also the open-position min-lot guard
     max_entry_frozen_s: float = 1.0        # fresh-book filter: laggard top-5 must have changed within this many s
     spike_persist_ms: int = 300            # Binance dislocation must stay above the hurdle this long before we fire (0 = immediate)
     scan_interval_s: float = 0.1
@@ -163,7 +163,7 @@ class BotConfig:
             max_slippage_pct=_f("MAX_SLIPPAGE_PCT", 0.05),
             phantom_frozen_s=_f("PHANTOM_FROZEN_S", 3.0),
             depth_bps=_f("DEPTH_BPS", 10.0),
-            min_order_usdt=_f("MIN_ORDER_USDT", 100.0),
+            min_order_usdt=_f("MIN_ORDER_USDT", 5.0),
             max_entry_frozen_s=_f("MAX_ENTRY_FROZEN_S", 1.0),
             spike_persist_ms=_i("SPIKE_PERSIST_MS", 300),
             scan_interval_s=_f("SCAN_INTERVAL_S", 0.1),
@@ -1384,7 +1384,7 @@ class BotEngine:
                              leader_usdt_mid: float, basis: float = 0.0, adj_pct: Optional[float] = None) -> None:
         signal_ts = time.time()
         size_usdt = min(self.allocated_per_slot_usdt(), max(0.0, self.equity_usdt - sum(p.size_usdt for p in await self.store.all_open())))
-        if size_usdt < 50: return  # min lot guard
+        if size_usdt < self.cfg.min_order_usdt: return  # min lot guard
         lev = max(1, int(self.cfg.leverage))
         notional_usdt = size_usdt * lev
         requested_notional = notional_usdt
