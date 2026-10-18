@@ -234,7 +234,7 @@ async def universe_watcher() -> None:
             else:
                 UNIVERSE["skipped"] = None
                 res = await build_universe(
-                    laggard=c.laggard_exchange, top_n=max(1, c.num_slots),
+                    laggard=c.laggard_exchange, top_n=max(1, c.universe_top_n),
                     max_price_usd=c.max_coin_price_usd,
                     min_volume_usdt=c.universe_min_volume_usdt,
                     min_vol_pct=c.universe_min_vol_pct,
@@ -259,7 +259,7 @@ async def universe_watcher() -> None:
 async def universe_auto():
     c = ENGINE.cfg
     return {"auto_universe": c.auto_universe, "coins": c.coins, "num_slots": c.num_slots,
-            "max_coin_price_usd": c.max_coin_price_usd,
+            "top_n": c.universe_top_n, "max_coin_price_usd": c.max_coin_price_usd,
             "min_volume_usdt": c.universe_min_volume_usdt, "min_vol_pct": c.universe_min_vol_pct,
             "refresh_s": c.universe_refresh_s, **UNIVERSE}
 

@@ -116,6 +116,7 @@ class BotConfig:
     universe_min_volume_usdt: float = 5_000_000.0   # liquidity floor (24h quote volume)
     universe_min_vol_pct: float = 1.0      # volatility floor (24h range / price %)
     universe_refresh_s: int = 60           # shortlist rebuild cadence
+    universe_top_n: int = 6                 # watch-breadth of the auto universe (independent of num_slots)
     # shadow comparison assumptions (per laggard exchange)
     coinswitch_taker_fee_pct: float = 0.065   # from instrument_info taker_fee_rate 0.00065
     coindcx_taker_fee_pct: float = 0.059
@@ -180,6 +181,7 @@ class BotConfig:
             universe_min_volume_usdt=_f("UNIVERSE_MIN_VOLUME_USDT", 5_000_000.0),
             universe_min_vol_pct=_f("UNIVERSE_MIN_VOL_PCT", 1.0),
             universe_refresh_s=_i("UNIVERSE_REFRESH_S", 60),
+            universe_top_n=_i("UNIVERSE_TOP_N", 6),
             coinswitch_taker_fee_pct=_f("COINSWITCH_TAKER_FEE_PCT", 0.065),
             coindcx_taker_fee_pct=_f("COINDCX_TAKER_FEE_PCT", 0.059),
             coinswitch_exec_latency_s=_f("COINSWITCH_EXEC_LATENCY_S", 1.0),
@@ -1150,14 +1152,14 @@ class BotEngine:
         return round(min(self.cfg.stop_max_pct, max(self.cfg.stop_min_pct, self.cfg.vol_k * sigma)), 4), "dynamic"
 
     def hurdle_pct(self) -> float:
-        # Entry gate = entry fee + exit fee + slippage buffer (user's exact formula; no extra margin).
+        # Entry gate = entry fee + exit fee + slippage buffer + required edge beyond cost.
         c = self.cfg
-        return c.entry_taker_fee_pct + c.exit_taker_fee_pct + c.slippage_buffer_pct
+        return c.entry_taker_fee_pct + c.exit_taker_fee_pct + c.slippage_buffer_pct + c.hurdle_extra_pct
 
     def dynamic_hurdle_pct(self, one_side_slippage_pct: float) -> float:
-        """Entry gate with the flat slippage buffer replaced by measured round-trip slippage (floored at the buffer)."""
+        """Entry gate with the flat slippage buffer replaced by measured round-trip slippage (floored at the buffer), plus required edge."""
         c = self.cfg
-        return c.entry_taker_fee_pct + c.exit_taker_fee_pct + max(c.slippage_buffer_pct, 2 * one_side_slippage_pct)
+        return c.entry_taker_fee_pct + c.exit_taker_fee_pct + max(c.slippage_buffer_pct, 2 * one_side_slippage_pct) + c.hurdle_extra_pct
 
     # --- phantom-liquidity guard ---------------------------------------------------
     def liquidity(self, coin: str, direction: str, notional_usdt: float) -> Optional[Dict[str, Any]]:
